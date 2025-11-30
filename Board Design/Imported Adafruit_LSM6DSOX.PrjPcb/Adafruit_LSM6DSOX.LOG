@@ -1,0 +1,23 @@
+Importer Log Report
+Project : Adafruit_LSM6DSOX.PrjPcb
+
+Section : Analyze Document - C:\Users\HP i7\Downloads\Adafruit_LSM6DSOX.sch
+    Analyzing data of C:\Users\HP i7\Downloads\Adafruit_LSM6DSOX.sch
+    Load settings
+    Load layers 175
+    Load schematic
+    Load Libraries 2
+    Load Library "microbuilder"
+    Load Packages 70
+    Load Symbols 17
+    Load DeviceSets 16
+    Load Library "supply1"
+    Load Packages 0
+    Load Symbols 2
+    Load DeviceSets 2
+    Load Attributes 3
+    Load Classes 3
+    Load Parts 45
+    Load Sheets 1
+    ERROR: Unhandled type <errors>
+EndSection

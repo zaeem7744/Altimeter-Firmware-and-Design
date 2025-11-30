@@ -1,0 +1,63 @@
+Altium Designer Pick and Place Locations
+D:\Projects\Altimeter Firmware and Design\Board Design\Altimeter_Board_Design\Project Outputs for Altimeter_Board_Design\Pick Place for Altimeter_Board.csv
+
+========================================================================================================================
+File Design Information:
+
+Date:       30/11/25
+Time:       03:51
+Revision:   Not in VersionControl
+Variant:    No variations
+Units used: mil
+
+"Designator","Comment","Layer","Footprint","Center-X(mil)","Center-Y(mil)","Rotation","Description"
+"J2","S2B-ZR-SM4A-TF_LF__SN_","BottomLayer","S2BZRSM4ATFLFSN","950.675","215.394","90","Connector"
+"IC1","NINA-B306-00B","TopLayer","NINAB30600B","863.988","435.142","0","Integrated Circuit"
+"RST","TP_1","BottomLayer","TestPoint1","88.583","346.142","90",""
+"DIO","TP_1","BottomLayer","TestPoint1","88.583","438.819","90",""
+"CLK","TP_1","BottomLayer","TestPoint1","88.583","531.496","90",""
+"GND","TP_1","BottomLayer","TestPoint1","88.583","253.464","90",""
+"3V3","TP_1","BottomLayer","TestPoint1","88.583","160.787","90",""
+"U3","BMP388","BottomLayer","PQFN50P200X200X80-10N","645.669","586.614","180","P-Sensor SPI I2C 1, 25 Bar SMD"
+"U2","LSM6DSO32TR","BottomLayer","FP-LGA-14L-DM00249496-MFG","659.449","226.378","180","INEMO INERTIAL MODULE: 3D ACCELE"
+"U4","W25Q16JVSNIQ TR","BottomLayer","FP-W25Q16JVSNIQ_TR-IPC_A","314.961","344.488","270","IC FLASH 16MBIT SPI/QUAD 8SOIC"
+"U1","TPS73033DBVT","BottomLayer","FP-DBV0005A-IPC_A","925.197","541.339","270","IC REG LINEAR 3.3V 200MA SOT23-5"
+"MODE","B3U-1000P","BottomLayer","FP-B3U-1000P-MFG","296.415","98.425","0","SWITCH TACTILE SPST-NO 0.05A 12V"
+"RESET","B3U-1000P","BottomLayer","FP-B3U-1000P-MFG","296.415","590.831","180","SWITCH TACTILE SPST-NO 0.05A 12V"
+"RN1","CAY10-103J4LF","BottomLayer","CAY10103J4LF","659.449","421.417","270","Resistor Network"
+"R9","RC0402FR-07220KL","TopLayer","RESC1005X40X25LL05T10","250.942","479.554","90",""
+"R8","CRCW0402976KFKED","TopLayer","FP-CRCW0402-e3-IPC_A","282.311","398.416","180","RES Thick Film, 976kO, 1%, 0.063W, 100ppm/°C, 0402"
+"R5","RC0402FR-0710KL","BottomLayer","RESC1005X40X25LL05T10","523.622","562.992","90",""
+"R4","RC0402FR-0710KL","BottomLayer","RESC1005X40X25LL05T10","497.047","462.598","180",""
+"R2","RC0402FR-0710KL","BottomLayer","RESC1005X40X25LL05T10","492.126","280.512","90",""
+"R1","RC0402FR-0710KL","BottomLayer","RESC1005X40X25LL05T10","497.047","393.701","180",""
+"R3","RC0402FR-071ML","TopLayer","RESC1005X40X25NL05T10","285.433","610.236","270",""
+"R7","RC0402FR-07330RL","TopLayer","RESC1005X40X25LL05T10","982.525","172.189","180",""
+"R6","RC0402FR-0710KL","BottomLayer","RESC1005X40X25LL05T10","492.126","127.953","90",""
+"LED1","XL-1010RGBC-WS2812B","TopLayer","XL1010RGBCWS2812B","865.284","121.008","90","LED"
+"L1","MAKK2016T3R3M","TopLayer","INDPM2016X100N","389.764","438.976","270","Inductor"
+"J1","ZX62-AB-5PA_31_","TopLayer","ZX62AB5PA31","104.151","344.488","270","Connector"
+"IC2","MP2322GQH-Z","TopLayer","MP2322GQHZ","329.468","275.591","180","Integrated Circuit"
+"FB1","BLM18EG101TN1D","TopLayer","FP-BLM18-0_15-t0_5-MFG","748.032","118.110","90","Chip Ferrite Bead, 0603, 100O @ 100MHz, 25%, 0.045O, 2A"
+"DS1","16-219A/T2D-AR2T1QY/3T","TopLayer","EVRL-0402-2_V","976.378","82.677","0","Chip LED, White, 5 V, 10 mA, 30 mW, -40 to 85 degC, 2-Pin SMD (0402), RoHS, Tape and Reel"
+"D2","PMEG6020AELRX","TopLayer","FP-SOD123W-MFG","134.864","76.614","180","DIODE SCHOTTKY 60V 2A CFP3"
+"D1","PRTR5V0U2X,215","TopLayer","SOT143B","405.875","591.693","180","Ultra low capacitance double rail-to-rail ESD protection diode"
+"C18","GRM1555C1H220JA01D","TopLayer","CAPC1005X55X25NL05T10","311.024","478.740","270",""
+"C19","CL05B104KA5NNNC","BottomLayer","FP-CL830-IPC_C","88.583","68.898","180","Cap Ceramic 100nF 25V X7R ±10% SMD 0402 +125°C Paper T/R"
+"C17","CL05A106MP8NUB8","TopLayer","FP-CL07-IPC_C","483.679","492.126","0","Cap Ceramic 10uF 10V X5R ±20% SMD 0402 +85°C Paper T/R"
+"C16","CL05A106MP8NUB8","TopLayer","FP-CL07-IPC_C","483.679","403.160","0","Cap Ceramic 10uF 10V X5R ±20% SMD 0402 +85°C Paper T/R"
+"C13","CL05A105KA5NQNC","TopLayer","FP-CL542-IPC_C","483.679","236.220","0","Cap Ceramic 1uF 25V X5R ±10% SMD 0402 +85°C Paper T/R"
+"C12","CL21A106KAYNNNE","TopLayer","FP-CL21-IPC_A","307.087","101.347","270","CL21 Series 0805 10uF 25V ±10% Tolerance X5R Multilayer Ceramic Chip Capacitor"
+"C11","CL21A106KAYNNNE","TopLayer","FP-CL21-IPC_A","425.197","101.347","270","CL21 Series 0805 10uF 25V ±10% Tolerance X5R Multilayer Ceramic Chip Capacitor"
+"C10","CC0402KRX7R9BB104","TopLayer","FP-CC0402-MFG","535.433","102.362","270","CAP CER 0.1UF 50V X7R 0402"
+"C9","CC0402KRX7R9BB104","TopLayer","FP-CC0402-MFG","478.216","313.140","0","CAP CER 0.1UF 50V X7R 0402"
+"C5","CL05B104KA5NNNC","BottomLayer","FP-CL830-IPC_C","767.717","561.024","270","Cap Ceramic 100nF 25V X7R ±10% SMD 0402 +125°C Paper T/R"
+"C3","CL05B104KA5NNNC","BottomLayer","FP-CL830-IPC_C","1092.520","580.709","180","Cap Ceramic 100nF 25V X7R ±10% SMD 0402 +125°C Paper T/R"
+"C2","CL05B104KA5NNNC","BottomLayer","FP-CL830-IPC_C","590.551","68.898","0","Cap Ceramic 100nF 25V X7R ±10% SMD 0402 +125°C Paper T/R"
+"C1","CL05A225KO5NQNC","BottomLayer","CAPC1005X60N","1092.520","472.441","180","Capacitor"
+"C4","GCJ31BR73A472KXJ1L","TopLayer","FP-GCJ31B-0_2-MFG","127.953","610.236","0","4700pF ±10%  1kV Ceramic Capacitor X7R 1206 (3216 Metric)"
+"C15","CL05B104KA5NNNC","TopLayer","FP-CL830-IPC_C","1074.659","83.504","180","Cap Ceramic 100nF 25V X7R ±10% SMD 0402 +125°C Paper T/R"
+"C14","CL05B104KA5NNNC","TopLayer","FP-CL830-IPC_C","1073.019","158.409","180","Cap Ceramic 100nF 25V X7R ±10% SMD 0402 +125°C Paper T/R"
+"C6","CL05B104KA5NNNC","BottomLayer","FP-CL830-IPC_C","89.534","623.189","0","Cap Ceramic 100nF 25V X7R ±10% SMD 0402 +125°C Paper T/R"
+"C8","CL05B102KB5NNND","TopLayer","FP-CL134-IPC_C","664.609","158.409","180","Cap Ceramic 1nF 50V X7R ±10% SMD 0402 +125°C Paper T/R"
+"C7","CL05B102KB5NNND","TopLayer","FP-CL134-IPC_C","659.449","78.740","180","Cap Ceramic 1nF 50V X7R ±10% SMD 0402 +125°C Paper T/R"
