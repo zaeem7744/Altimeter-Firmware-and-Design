@@ -173,6 +173,10 @@ class TelemetryDashboard(QMainWindow):
             return
             
         # Handle data export control messages
+        if data.startswith("t_ms,") or data.startswith("timestamp,"):
+            # CSV header from firmware - ignore, processor handles data lines only
+            return
+        
         if data == "BEGIN_DATA_EXPORT":
             print("🚀 Data export started")
             self.is_exporting_data = True

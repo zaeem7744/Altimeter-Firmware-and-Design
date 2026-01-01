@@ -15,12 +15,17 @@ using namespace mbed;
 #define SAMPLE_RATE_HZ 50
 #define SAMPLE_INTERVAL_MS (1000 / SAMPLE_RATE_HZ)
 
-// Data structures - SIMPLIFIED
-struct SensorSample {
-  uint32_t timestamp;
-  float altitude;
-  float acceleration;
-  // Removed velocity and temperature to save space
+// Data structures - FLIGHT SAMPLE (RICH DATA)
+struct FlightSample {
+  uint32_t t_ms;       // device timestamp in ms
+  float    alt_m;      // altitude (m)
+  float    ax_ms2;     // accel x (m/s^2)
+  float    ay_ms2;     // accel y (m/s^2)
+  float    az_ms2;     // accel z (m/s^2)
+  float    gx_rad_s;   // gyro x (rad/s)
+  float    gy_rad_s;   // gyro y (rad/s)
+  float    gz_rad_s;   // gyro z (rad/s)
+  float    temp_C;     // temperature (°C)
 };
 
 struct SectorData {
@@ -28,7 +33,7 @@ struct SectorData {
   uint32_t sectorSequence;
   uint16_t samplesCount;
   uint16_t reserved;
-  SensorSample samples[SAMPLES_PER_SECTOR];
+  FlightSample samples[SAMPLES_PER_SECTOR];
 };
 
 class FlashStorage {
@@ -41,7 +46,7 @@ private:
   uint32_t storageBaseAddr;
   uint32_t sectorSize;
   
-  SensorSample ramBuffer[10];
+  FlightSample ramBuffer[10];
   uint8_t ramBufferCount;
   unsigned long lastSampleTime;
   
@@ -52,8 +57,8 @@ private:
 public:
   FlashStorage();
   bool begin();
-  void addSample(float altitude, float acceleration, uint32_t timestamp);
-  SensorSample getSampleAtIndex(uint32_t index);
+  void addSample(const FlightSample &sample);
+  FlightSample getSampleAtIndex(uint32_t index);
   void exportAllData();
   void printStatus();
   void clearStorage();
@@ -61,6 +66,9 @@ public:
   uint32_t getUsagePercent();
   bool isFull();
   uint32_t getMaxCapacity();
+
+  // Debug/diagnostic: dump all stored samples as CSV to Serial
+  void dumpToSerialSeconds();
 };
 
 extern FlashStorage flashStorage;

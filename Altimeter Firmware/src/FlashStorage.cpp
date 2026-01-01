@@ -1,4 +1,5 @@
 #include "FlashStorage.h"
+#include <math.h>
 
 FlashStorage flashStorage;
 
@@ -154,6 +155,44 @@ void FlashStorage::printStatus() {
   Serial.println(TOTAL_SAMPLES);
 }
 
+// Simple sanity check to decide if a logged sample is "valid enough" to print.
+static bool isSampleValid(const SensorSample &s) {
+  // Reject NaN/Inf values
+  if (!isfinite(s.time_s) ||
+      !isfinite(s.altitude_m) ||
+      !isfinite(s.ax_ms2) ||
+      !isfinite(s.ay_ms2) ||
+      !isfinite(s.az_ms2)) {
+    return false;
+  }
+
+  // Time must be non-negative and not absurdly large (tune as needed)
+  if (s.time_s < 0.0f || s.time_s > 1e6f) {
+    return false;
+  }
+
+  // Altitude sanity bounds (rough: -500 m .. 10 km)
+  if (s.altitude_m < -500.0f || s.altitude_m > 10000.0f) {
+    return false;
+  }
+
+  // Acceleration sanity bounds (rough: +/- 50 g)
+  const float MAX_A = 500.0f; // m/s^2
+  if (fabsf(s.ax_ms2) > MAX_A ||
+      fabsf(s.ay_ms2) > MAX_A ||
+      fabsf(s.az_ms2) > MAX_A) {
+    return false;
+  }
+
+  // Also treat a fully-zero sample as invalid (keeps existing behavior)
+  if (s.time_s == 0.0f && s.altitude_m == 0.0f &&
+      s.ax_ms2 == 0.0f && s.ay_ms2 == 0.0f && s.az_ms2 == 0.0f) {
+    return false;
+  }
+
+  return true;
+}
+
 void FlashStorage::dumpToSerialSeconds() {
   if (totalSamplesRecorded == 0) {
     Serial.println("📭 No data in flash");
@@ -203,9 +242,8 @@ void FlashStorage::dumpToSerialSeconds() {
       if (printed >= TOTAL_SAMPLES) break;
       SensorSample &s = sector.samples[sIdx];
 
-      if (s.time_s == 0.0f && s.altitude_m == 0.0f &&
-          s.ax_ms2 == 0.0f && s.ay_ms2 == 0.0f && s.az_ms2 == 0.0f) {
-        continue;
+      if (!isSampleValid(s)) {
+        continue; // skip unreal / corrupted samples
       }
 
       Serial.print(s.time_s, 3); Serial.print(',');

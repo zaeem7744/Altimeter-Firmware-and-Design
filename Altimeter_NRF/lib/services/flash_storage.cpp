@@ -114,22 +114,18 @@ void FlashStorage::advanceToNextSector() {
   saveCurrentSector();
 }
 
-void FlashStorage::addSample(float altitude, float acceleration, uint32_t timestamp) {
+void FlashStorage::addSample(const FlightSample &sample) {
   // Add to RAM buffer
-  ramBuffer[ramBufferCount] = {
-    timestamp,
-    altitude,
-    acceleration
-  };
+  ramBuffer[ramBufferCount] = sample;
   ramBufferCount++;
   
   // Optional debug output - only if serial is available and not too frequent
   static unsigned long lastDebugTime = 0;
   if (Serial && (millis() - lastDebugTime > 5000)) { // Debug every 5 seconds max
     Serial.print("📝 Sample buffer: Alt=");
-    Serial.print(altitude);
-    Serial.print(", Accel=");
-    Serial.print(acceleration);
+    Serial.print(sample.alt_m);
+    Serial.print(", Az=");
+    Serial.print(sample.az_ms2);
     Serial.print(", Count=");
     Serial.println(ramBufferCount);
     lastDebugTime = millis();
@@ -158,9 +154,10 @@ void FlashStorage::addSample(float altitude, float acceleration, uint32_t timest
   }
 }
 
-SensorSample FlashStorage::getSampleAtIndex(uint32_t index) {
+FlightSample FlashStorage::getSampleAtIndex(uint32_t index) {
   if (index >= totalSamplesRecorded) {
-    return SensorSample{0, 0.0, 0.0};
+    FlightSample empty = {};
+    return empty;
   }
   
   uint32_t sectorIdx = index / SAMPLES_PER_SECTOR;
@@ -172,14 +169,16 @@ SensorSample FlashStorage::getSampleAtIndex(uint32_t index) {
   if (flash.read(&sector, addr, sizeof(SectorData)) != 0) {
     Serial.print("❌ Error reading sector ");
     Serial.println(sectorIdx);
-    return SensorSample{0, 0.0, 0.0};
+    FlightSample empty = {};
+    return empty;
   }
   
   if (sector.magic == 0x524F434B && sampleIdx < sector.samplesCount) {
     return sector.samples[sampleIdx];
   }
   
-  return SensorSample{0, 0.0, 0.0};
+  FlightSample empty = {};
+  return empty;
 }
 
 void FlashStorage::exportAllData() {
@@ -189,7 +188,7 @@ void FlashStorage::exportAllData() {
   }
   
   Serial.println("BEGIN_DATA_EXPORT");
-  Serial.println("timestamp,altitude,acceleration");
+  Serial.println("t_ms,alt_m,ax_ms2,ay_ms2,az_ms2,gx_rad_s,gy_rad_s,gz_rad_s,temp_C");
   
   uint32_t samplesExported = 0;
   
@@ -211,11 +210,24 @@ void FlashStorage::exportAllData() {
     }
     
     if (sector.magic == 0x524F434B && sampleIdx < sector.samplesCount) {
-      Serial.print(sector.samples[sampleIdx].timestamp);
+      const FlightSample &s = sector.samples[sampleIdx];
+      Serial.print(s.t_ms);
       Serial.print(",");
-      Serial.print(sector.samples[sampleIdx].altitude, 2);
+      Serial.print(s.alt_m, 2);
       Serial.print(",");
-      Serial.print(sector.samples[sampleIdx].acceleration, 2);
+      Serial.print(s.ax_ms2, 2);
+      Serial.print(",");
+      Serial.print(s.ay_ms2, 2);
+      Serial.print(",");
+      Serial.print(s.az_ms2, 2);
+      Serial.print(",");
+      Serial.print(s.gx_rad_s, 3);
+      Serial.print(",");
+      Serial.print(s.gy_rad_s, 3);
+      Serial.print(",");
+      Serial.print(s.gz_rad_s, 3);
+      Serial.print(",");
+      Serial.print(s.temp_C, 2);
       Serial.println();
       samplesExported++;
       
@@ -311,4 +323,46 @@ uint32_t FlashStorage::getMaxCapacity() {
 
 bool FlashStorage::isFull() {
   return totalSamplesRecorded >= TOTAL_SAMPLES;
+}
+
+void FlashStorage::dumpToSerialSeconds() {
+  if (totalSamplesRecorded == 0) {
+    Serial.println("📭 No data in flash");
+    return;
+  }
+
+  Serial.println("=== FLASH DUMP (time_s) ===");
+
+  // Find first valid sample as time zero
+  FlightSample first = getSampleAtIndex(0);
+  uint32_t t0 = first.t_ms;
+
+  Serial.println("time_s,alt_m,ax_ms2,ay_ms2,az_ms2,gx_rad_s,gy_rad_s,gz_rad_s,temp_C");
+
+  for (uint32_t i = 0; i < totalSamplesRecorded && i < TOTAL_SAMPLES; ++i) {
+    FlightSample s = getSampleAtIndex(i);
+
+    // Skip obviously empty samples
+    if (s.t_ms == 0 && s.alt_m == 0.0f && s.az_ms2 == 0.0f) {
+      continue;
+    }
+
+    float time_s = (s.t_ms - t0) / 1000.0f;
+
+    Serial.print(time_s, 3); Serial.print(",");
+    Serial.print(s.alt_m, 2); Serial.print(",");
+    Serial.print(s.ax_ms2, 3); Serial.print(",");
+    Serial.print(s.ay_ms2, 3); Serial.print(",");
+    Serial.print(s.az_ms2, 3); Serial.print(",");
+    Serial.print(s.gx_rad_s, 3); Serial.print(",");
+    Serial.print(s.gy_rad_s, 3); Serial.print(",");
+    Serial.print(s.gz_rad_s, 3); Serial.print(",");
+    Serial.println(s.temp_C, 2);
+
+    if (i % 100 == 0) {
+      delay(5); // avoid USB buffer overflow
+    }
+  }
+
+  Serial.println("=== END FLASH DUMP ===");
 }

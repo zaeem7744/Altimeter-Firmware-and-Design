@@ -141,6 +141,13 @@ class DataPanel(QWidget):
         self.plot_widget.getViewBox().enableAutoRange(x=True, y=True)
         # Auto-fit on resize
         self.plot_widget.installEventFilter(self)
+
+        # Crosshair for interactive inspection
+        self.vLine = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(color=(0, 0, 0), width=1))
+        self.hLine = pg.InfiniteLine(angle=0,  movable=False, pen=pg.mkPen(color=(0, 0, 0), width=1))
+        self.plot_widget.addItem(self.vLine, ignoreBounds=True)
+        self.plot_widget.addItem(self.hLine, ignoreBounds=True)
+        self.plot_widget.scene().sigMouseMoved.connect(self._on_mouse_moved)
         
         layout.addWidget(self.plot_widget)
         
@@ -283,6 +290,15 @@ class DataPanel(QWidget):
         self._last_y_max = None
         # Keep auto-range enabled
         self.plot_widget.getViewBox().enableAutoRange(x=True, y=True)
+
+        # Re-add crosshair lines after clear
+        try:
+            self.vLine = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(color=(0, 0, 0), width=1))
+            self.hLine = pg.InfiniteLine(angle=0,  movable=False, pen=pg.mkPen(color=(0, 0, 0), width=1))
+            self.plot_widget.addItem(self.vLine, ignoreBounds=True)
+            self.plot_widget.addItem(self.hLine, ignoreBounds=True)
+        except Exception:
+            pass
         
     def eventFilter(self, obj, event):
         if obj is self.plot_widget and event.type() == QEvent.Type.Resize:
@@ -321,3 +337,19 @@ class DataPanel(QWidget):
                     pix.save(filename)
                 except Exception:
                     pass
+
+    def _on_mouse_moved(self, pos):
+        """Update crosshair position on mouse move (MATLAB-like inspector)."""
+        try:
+            vb = self.plot_widget.plotItem.vb
+            if not vb.sceneBoundingRect().contains(pos):
+                return
+            mouse_point = vb.mapSceneToView(pos)
+            x = mouse_point.x()
+            y = mouse_point.y()
+
+            if hasattr(self, 'vLine') and hasattr(self, 'hLine'):
+                self.vLine.setPos(x)
+                self.hLine.setPos(y)
+        except Exception:
+            pass

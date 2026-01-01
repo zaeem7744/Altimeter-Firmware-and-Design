@@ -77,9 +77,10 @@ class DataProcessor:
             return None
 
     def _is_csv_data(self, data):
-        """Check if data is in CSV format from flash export - tolerant of extra field"""
+        """Check if data is in CSV format from flash export (new rich format)."""
         # Skip header row and control messages
-        if (data.startswith('timestamp,') or 
+        if (data.startswith('t_ms,') or 
+            data.startswith('timestamp,') or  # legacy safety
             data == 'BEGIN_DATA_EXPORT' or 
             data == 'END_DATA_EXPORT' or 
             data == 'DATA_EXPORT_COMPLETE' or
@@ -95,32 +96,60 @@ class DataProcessor:
             parts = [p.strip() for p in data.strip().split(',')]
             if len(parts) >= 3:
                 try:
-                    int(parts[0])      # timestamp (integer)
-                    float(parts[1])    # altitude (float)
-                    float(parts[2])    # acceleration (float)
+                    int(parts[0])      # t_ms (integer)
+                    float(parts[1])    # alt_m (float)
+                    float(parts[2])    # ax_ms2 or similar (float)
                     return True
                 except (ValueError, TypeError, IndexError):
                     pass
         return False
 
     def _process_csv_data(self, data):
-        """Process CSV data from flash storage export - tolerant of extra field"""
+        """Process CSV data from flash storage export (rich FlightSample).
+
+        Firmware CSV layout:
+            t_ms,alt_m,ax_ms2,ay_ms2,az_ms2,gx_rad_s,gy_rad_s,gz_rad_s,temp_C
+        We keep all fields so they are available in the DataFrame and CSV export.
+        """
         try:
             data = data.strip()
             parts = [p.strip() for p in data.split(',')]
             
-            if len(parts) >= 3:  # Use first three fields
-                timestamp = int(parts[0])
-                altitude = float(parts[1])
-                acceleration = float(parts[2])
+            if len(parts) >= 2:
+                t_ms  = int(parts[0])
+                alt_m = float(parts[1])
+
+                # Safely parse all optional fields if present
+                ax = float(parts[2]) if len(parts) > 2 else None
+                ay = float(parts[3]) if len(parts) > 3 else None
+                az = float(parts[4]) if len(parts) > 4 else None
+                gx = float(parts[5]) if len(parts) > 5 else None
+                gy = float(parts[6]) if len(parts) > 6 else None
+                gz = float(parts[7]) if len(parts) > 7 else None
+                temp_C = float(parts[8]) if len(parts) > 8 else None
+
+                # Choose vertical acceleration for main "acceleration" field
+                if az is not None:
+                    acceleration = az
+                elif ax is not None:
+                    acceleration = ax
+                else:
+                    acceleration = 0.0
                 
                 self.samples_received += 1
                 
                 processed_data = {
                     "timestamp": datetime.now(),
-                    "device_timestamp": timestamp,
-                    "altitude": altitude,
+                    "device_timestamp": t_ms,
+                    "altitude": alt_m,
                     "acceleration": acceleration,
+                    "ax_ms2": ax,
+                    "ay_ms2": ay,
+                    "az_ms2": az,
+                    "gx_rad_s": gx,
+                    "gy_rad_s": gy,
+                    "gz_rad_s": gz,
+                    "temp_C": temp_C,
                     "raw_data": data,
                     "data_type": "flash_data"
                 }
@@ -236,6 +265,19 @@ class DataProcessor:
             try:
                 # Create DataFrame from collected samples
                 self.flight_data = pd.DataFrame(self.current_export_data)
+
+                # Ensure strict ordering by device_timestamp and drop obviously invalid rows
+                if not self.flight_data.empty and 'device_timestamp' in self.flight_data.columns:
+                    # Remove rows with zero device_timestamp (invalid/empty samples)
+                    before = len(self.flight_data)
+                    self.flight_data = self.flight_data[self.flight_data['device_timestamp'] != 0]
+                    after = len(self.flight_data)
+                    if before != after:
+                        print(f"⚠️ Dropped {before - after} invalid samples (device_timestamp == 0)")
+
+                    # Sort by device_timestamp to guarantee recording order
+                    self.flight_data = self.flight_data.sort_values('device_timestamp').reset_index(drop=True)
+
                 print(f"✅ SUCCESS: DataFrame created with {len(self.flight_data)} rows")
                 
                 if not self.flight_data.empty:
@@ -558,10 +600,25 @@ class DataProcessor:
         if not self.flight_data.empty:
             export_data = self.flight_data.copy()
             
+            # Drop raw BLE text column if present
             if 'raw_data' in export_data.columns:
                 export_data = export_data.drop('raw_data', axis=1)
+
+            # Filter out obviously invalid/empty samples (device_timestamp == 0)
+            if 'device_timestamp' in export_data.columns:
+                export_data = export_data[export_data['device_timestamp'] != 0]
+
+            if export_data.empty:
+                print("❌ No valid samples to export (all were empty)")
+                return False
                 
-            preferred_order = ['timestamp', 'device_timestamp', 'altitude', 'acceleration']
+            preferred_order = [
+                'timestamp', 'device_timestamp',
+                'altitude', 'acceleration',
+                'ax_ms2', 'ay_ms2', 'az_ms2',
+                'gx_rad_s', 'gy_rad_s', 'gz_rad_s',
+                'temp_C'
+            ]
             existing_columns = [col for col in preferred_order if col in export_data.columns]
             other_columns = [col for col in export_data.columns if col not in preferred_order]
             final_order = existing_columns + other_columns

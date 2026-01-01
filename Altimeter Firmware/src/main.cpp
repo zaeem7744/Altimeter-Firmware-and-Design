@@ -6,15 +6,31 @@
 
 #define SEALEVELPRESSURE_HPA (1013.25)
 
+// Hardware pins
+const int BUTTON_PIN = 5;    // Start/stop logging button on D5 (active LOW with INPUT_PULLUP)
+
+// Use built-in RGB LED to indicate logging state (Nano 33 BLE: LEDR/LEDG/LEDB)
+const int LOG_LED_PIN = LEDG;  // blink green channel while logging
+
 // IMU + baro objects
 Adafruit_LSM6DSO32 lsm6;
 Adafruit_BMP3XX    bmp;
 
 // Logging control
-bool loggingEnabled       = false;
+bool loggingEnabled          = false;
 unsigned long lastSampleTime = 0;
 unsigned long logStart_ms    = 0;   // time zero for this logging session
 unsigned long ignoreSerialUntil = 0;  // ignore junk for first 1 second
+
+// Button state / debounce
+bool lastButtonState            = HIGH;  // because of INPUT_PULLUP
+unsigned long lastButtonChange  = 0;
+const unsigned long BUTTON_DEBOUNCE_MS = 50;
+
+// LED blink state
+bool logLedOn                   = false;
+unsigned long lastLogLedToggle  = 0;
+const unsigned long LOG_LED_BLINK_MS = 250;
 
 // Sample rate (50 samples per second)
 const uint16_t SAMPLE_RATE_HZ     = 50;
@@ -113,6 +129,11 @@ void setup() {
   Serial.begin(115200);
   delay(200);  // let USB settle
 
+  // Configure button and logging LED
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(LOG_LED_PIN, OUTPUT);
+  digitalWrite(LOG_LED_PIN, HIGH);  // active-low LED: HIGH = off
+
   // Ignore any garbage for the first 1 second after reset
   ignoreSerialUntil = millis() + 1000;
 
@@ -129,6 +150,34 @@ void setup() {
 
 void loop() {
   unsigned long now = millis();
+
+  // --- Handle button for start/stop logging ---
+  bool buttonState = digitalRead(BUTTON_PIN);
+  if (buttonState != lastButtonState) {
+    lastButtonChange = now;
+    lastButtonState  = buttonState;
+  }
+
+  // After debounce interval, check for a stable press (active LOW)
+  if ((now - lastButtonChange) > BUTTON_DEBOUNCE_MS) {
+    static bool lastStableButtonState = HIGH;
+    if (buttonState != lastStableButtonState) {
+      lastStableButtonState = buttonState;
+
+      if (buttonState == LOW) {  // button pressed
+        // Toggle logging state
+        loggingEnabled = !loggingEnabled;
+
+        if (loggingEnabled) {
+          lastSampleTime = 0;
+          logStart_ms    = millis();
+          Serial.println(F("🟢 Logging to FLASH STARTED (button)"));
+        } else {
+          Serial.println(F("🔴 Logging STOPPED (button)"));
+        }
+      }
+    }
+  }
 
   // Heartbeat every second
   static unsigned long lastHeartbeat = 0;
@@ -155,6 +204,33 @@ void loop() {
     Serial.println(c);
     processSerialCommand(c);
   }
+
+  // Indicate logging state on RGB LED (green channel)
+  if (loggingEnabled) {
+    if (now - lastLogLedToggle >= LOG_LED_BLINK_MS) {
+      lastLogLedToggle = now;
+      logLedOn = !logLedOn;
+      // Active-low LED: LOW = on, HIGH = off
+      digitalWrite(LOG_LED_PIN, logLedOn ? LOW : HIGH);
+    }
+  } else {
+  // Indicate logging state on RGB LED (green channel)
+  if (loggingEnabled) {
+    if (now - lastLogLedToggle >= LOG_LED_BLINK_MS) {
+      lastLogLedToggle = now;
+      logLedOn = !logLedOn;
+      // Active-low LED: LOW = on, HIGH = off
+      digitalWrite(LOG_LED_PIN, logLedOn ? LOW : HIGH);
+    }
+  } else {
+    // Ensure LED is off when not logging
+    if (logLedOn) {
+      logLedOn = false;
+      digitalWrite(LOG_LED_PIN, HIGH);
+    }
+  }
+
+  // Periodic logging when enabled
 
   // Periodic logging when enabled
   if (loggingEnabled) {

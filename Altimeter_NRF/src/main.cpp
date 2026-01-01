@@ -1,11 +1,21 @@
-// main.cpp - COMPLETE WITH SPEED OPTIMIZATION
+// main.cpp - SENSOR-INTEGRATED FLIGHT LOGGER
 #include <Arduino.h>
 #include <ArduinoBLE.h>
+#include <Wire.h>
+#include <Adafruit_LSM6DSO32.h>
+#include <Adafruit_BMP3XX.h>
 #include "flash_storage.h"
 void setLEDColor(uint8_t red, uint8_t green, uint8_t blue);
 
 // ==================== CONFIGURATION ====================
 #define BUTTON_PIN D5
+
+// External sensor I2C addresses
+#define LSM6DSO32_ADDR 0x6A
+#define BMP3XX_ADDR    0x77
+
+// Sea level pressure for altitude calculation (adjust for launch site)
+#define SEALEVELPRESSURE_HPA (1013.25)
 
 #define DEVICE_NAME "RocketTelemetry"
 #define SERVICE_UUID "19B10000-E8F2-537E-4F6C-D104768A1214"
@@ -23,7 +33,8 @@ void setLEDColor(uint8_t red, uint8_t green, uint8_t blue);
 #define CMD_MEMORY_STATUS "MEMORY_STATUS"
 #define CMD_EXTRACT_DATA "EXTRACT_DATA"
 #define CMD_CLEAR_MEMORY "CLEAR_MEMORY"
-#define CMD_GENERATE_TEST_DATA "GENERATE_TEST_DATA"
+// Serial-only debug command to dump flash contents as CSV
+#define CMD_DUMP_SERIAL "DUMP"
 
 // ==================== SYSTEM STATES ====================
 enum DeviceMode {
@@ -52,8 +63,6 @@ struct SystemState {
 class StateManager {
 private:
   SystemState state;
-  float simulatedAltitude;
-  float simulatedAcceleration;
   
   void initializeState() {
     state.mode = MODE_IDLE;
@@ -66,19 +75,6 @@ private:
     state.dataPoints = 0;
     state.lastCommand = "";
     state.pendingDisconnect = false;
-    simulatedAltitude = 0.0;
-    simulatedAcceleration = 9.8;
-  }
-  
-  void simulateSensorData() {
-    if (simulatedAltitude < 500.0) {
-      simulatedAcceleration = 9.8 + random(0, 50) / 10.0;
-      simulatedAltitude += simulatedAcceleration * 0.1;
-    } else {
-      simulatedAcceleration = -4.9;
-      simulatedAltitude += simulatedAcceleration * 0.1;
-      if (simulatedAltitude < 0) simulatedAltitude = 0;
-    }
   }
 
 public:
@@ -198,16 +194,9 @@ public:
       if (Serial) Serial.println("🗑️ Clearing memory...");
       flashStorage.clearStorage();
     }
-    else if (command == CMD_GENERATE_TEST_DATA) {
-      if (Serial) Serial.println("🎯 Generating test data...");
-      // Generate 100 test samples
-      for(int i = 0; i < 100; i++) {
-        float testAlt = 10.0 + (i * 2.5) + (random(-50, 50) / 10.0);
-        float testAcc = 9.8 + (random(-20, 20) / 10.0);
-        flashStorage.addSample(testAlt, testAcc, millis() + (i * 20));
-        if (i % 20 == 0) delay(10); // Small delay every 20 samples
-      }
-      if (Serial) Serial.println("✅ Generated 100 test samples");
+    else if (command == CMD_DUMP_SERIAL) {
+      if (Serial) Serial.println("📤 Dumping flash contents to Serial as CSV (time_s)...");
+      flashStorage.dumpToSerialSeconds();
     }
     else {
       if (Serial) Serial.println("❌ Unknown command: " + command);
@@ -232,24 +221,21 @@ public:
     return memoryStatus;
   }
   
-  void generateTelemetryData() {
+  void generateTelemetryData(const FlightSample &sample) {
     if (!state.logging) return;
     
-    simulateSensorData();
-    
-    // Store in flash memory with timestamp
-    flashStorage.addSample(simulatedAltitude, simulatedAcceleration, millis());
+    // Store in flash memory
+    flashStorage.addSample(sample);
     state.dataPoints++;
     
-    // Also send live telemetry over BLE
+    // Also send live telemetry over BLE (altitude + vertical accel)
     if (state.bleConnected) {
       String telemetry = "TELEMETRY:";
-      telemetry += "ALT=" + String(simulatedAltitude, 2);
-      telemetry += ",ACC=" + String(simulatedAcceleration, 2);
-      telemetry += ",TIME=" + String(millis());
+      telemetry += "ALT=" + String(sample.alt_m, 2);
+      telemetry += ",ACC=" + String(sample.az_ms2, 2);
+      telemetry += ",TIME=" + String(sample.t_ms);
       telemetry += ",POINTS=" + String(state.dataPoints);
       
-      // This would be sent via BLE characteristic
       Serial.println(telemetry);
     }
   }
@@ -400,10 +386,6 @@ public:
         else if (receivedCommand == CMD_EXTRACT_DATA) {
           startControlledDataExport();
         }
-        else if (receivedCommand == CMD_GENERATE_TEST_DATA) {
-          // Command will be processed by processCommand, just send confirmation
-          sendData("TEST_DATA_GENERATED");
-        }
         
         newCommandAvailable = false;
         receivedCommand = "";
@@ -453,8 +435,8 @@ public:
     sendData("BEGIN_DATA_EXPORT");
     delay(30);
     
-    // Send header
-    sendData("timestamp,altitude,acceleration");
+    // Send header (match flash_storage CSV)
+    sendData("t_ms,alt_m,ax_ms2,ay_ms2,az_ms2,gx_rad_s,gy_rad_s,gz_rad_s,temp_C");
     delay(30);
     
     // Send memory status for debugging
@@ -485,11 +467,22 @@ public:
     }
 
     // Get and send the actual sample data
-    SensorSample sample = flashStorage.getSampleAtIndex(currentExportIndex);
+    FlightSample sample = flashStorage.getSampleAtIndex(currentExportIndex);
+
+    // If we got an "empty" sample (all zeros), treat as end of valid data
+    if (sample.t_ms == 0 && sample.alt_m == 0.0f && sample.az_ms2 == 0.0f) {
+      return false;
+    }
     
-    String dataLine = String(sample.timestamp) + "," + 
-                     String(sample.altitude, 2) + "," + 
-                     String(sample.acceleration, 2);
+    String dataLine = String(sample.t_ms) + "," +
+                     String(sample.alt_m, 2) + "," +
+                     String(sample.ax_ms2, 2) + "," +
+                     String(sample.ay_ms2, 2) + "," +
+                     String(sample.az_ms2, 2) + "," +
+                     String(sample.gx_rad_s, 3) + "," +
+                     String(sample.gy_rad_s, 3) + "," +
+                     String(sample.gz_rad_s, 3) + "," +
+                     String(sample.temp_C, 2);
     
     sendData(dataLine);
     currentExportIndex++;
@@ -752,6 +745,92 @@ void updateLED(StateManager& stateManager, ButtonHandler& buttonHandler) {
   }
 }
 
+// ==================== SENSOR GLOBALS ====================
+Adafruit_LSM6DSO32 lsm6dso32;
+Adafruit_BMP3XX    bmp;
+static bool sensorsInitialized = false;
+
+static bool i2cDevicePresent(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  return (Wire.endTransmission() == 0);
+}
+
+static bool initSensors() {
+  Wire.begin();
+  Wire.setClock(400000); // fast I2C
+
+  // Initialize LSM6DSO32
+  if (!lsm6dso32.begin_I2C(LSM6DSO32_ADDR, &Wire)) {
+    if (Serial) {
+      Serial.println("❌ Failed to find external LSM6DSO32 at expected address!");
+      Serial.println("   Check wiring and SDO pin.");
+    }
+    return false;
+  }
+  lsm6dso32.setAccelRange(LSM6DSO32_ACCEL_RANGE_8_G);
+  lsm6dso32.setGyroRange(LSM6DS_GYRO_RANGE_2000_DPS);
+  lsm6dso32.setAccelDataRate(LSM6DS_RATE_104_HZ);
+  lsm6dso32.setGyroDataRate(LSM6DS_RATE_104_HZ);
+
+  // Initialize BMP390
+  if (!bmp.begin_I2C(BMP3XX_ADDR, &Wire)) {
+    if (Serial) {
+      Serial.println("❌ Failed to find BMP390 at expected address!");
+      Serial.println("   Check wiring and SDO pin.");
+    }
+    return false;
+  }
+  bmp.setTemperatureOversampling(BMP3_OVERSAMPLING_8X);
+  bmp.setPressureOversampling(BMP3_OVERSAMPLING_4X);
+  bmp.setIIRFilterCoeff(BMP3_IIR_FILTER_COEFF_3);
+  bmp.setOutputDataRate(BMP3_ODR_50_HZ);
+
+  if (Serial) {
+    Serial.println("✅ LSM6DSO32 + BMP390 initialized");
+  }
+  return true;
+}
+
+static bool readSensorsIntoSample(FlightSample &sample) {
+  if (!sensorsInitialized) {
+    return false;
+  }
+
+  // Check that devices are still present
+  if (!i2cDevicePresent(LSM6DSO32_ADDR) || !i2cDevicePresent(BMP3XX_ADDR)) {
+    static unsigned long lastWarn = 0;
+    if (Serial && millis() - lastWarn > 1000) {
+      Serial.println("⚠️ Sensor disconnected - skipping sample");
+      lastWarn = millis();
+    }
+    return false;
+  }
+
+  sensors_event_t accel, gyro, temp;
+  lsm6dso32.getEvent(&accel, &gyro, &temp);
+
+  if (!bmp.performReading()) {
+    static unsigned long lastWarn = 0;
+    if (Serial && millis() - lastWarn > 1000) {
+      Serial.println("⚠️ BMP390 read failed - skipping sample");
+      lastWarn = millis();
+    }
+    return false;
+  }
+
+  sample.t_ms   = millis();
+  sample.alt_m  = bmp.readAltitude(SEALEVELPRESSURE_HPA);
+  sample.ax_ms2 = accel.acceleration.x;
+  sample.ay_ms2 = accel.acceleration.y;
+  sample.az_ms2 = accel.acceleration.z;
+  sample.gx_rad_s = gyro.gyro.x;
+  sample.gy_rad_s = gyro.gyro.y;
+  sample.gz_rad_s = gyro.gyro.z;
+  sample.temp_C   = bmp.temperature;
+
+  return true;
+}
+
 // ==================== GLOBAL INSTANCES ====================
 StateManager stateManager;
 BLEHandler bleHandler;
@@ -806,6 +885,13 @@ void setup() {
   stateManager.begin();
   buttonHandler.begin();
   flashStorage.begin();
+
+  // Initialize external sensors
+  sensorsInitialized = initSensors();
+  if (!sensorsInitialized && Serial) {
+    Serial.println("⚠️ Sensors NOT initialized - logging will be disabled");
+  }
+
   stateManager.setMode(MODE_IDLE);
   
   // Final LED indication that system is ready for independent operation
@@ -814,6 +900,15 @@ void setup() {
 
 void loop() {
   unsigned long currentTime = millis();
+
+  // Check for Serial commands (typed in Serial Monitor)
+  if (Serial && Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    if (cmd.length() > 0) {
+      stateManager.processCommand(cmd);
+    }
+  }
   
   buttonHandler.update(stateManager, bleHandler);
   
@@ -825,9 +920,12 @@ void loop() {
   updateLED(stateManager, buttonHandler);
   
   // Generate and store telemetry data when logging
-  if (stateManager.isLogging()) {
+  if (stateManager.isLogging() && sensorsInitialized) {
     if (currentTime - lastTelemetryTime >= TELEMETRY_INTERVAL) {
-      stateManager.generateTelemetryData();
+      FlightSample sample = {};
+      if (readSensorsIntoSample(sample)) {
+        stateManager.generateTelemetryData(sample);
+      }
       lastTelemetryTime = currentTime;
     }
   }
