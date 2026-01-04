@@ -266,6 +266,7 @@ void FlashStorage::dumpToSerialSeconds() {
   Serial.println("=== END FLASH DUMP ===");
 }
 
+
 void FlashStorage::dumpToCallback(LineCallback cb, void* ctx) {
   if (!cb) return;
 
@@ -275,6 +276,42 @@ void FlashStorage::dumpToCallback(LineCallback cb, void* ctx) {
     cb("NO_DATA_IN_FLASH", ctx);
     cb("=== END FLASH DUMP ===", ctx);
     return;
+  }
+
+  // Full dump is implemented in terms of the chunked API with a
+  // very large chunk size so all samples are sent in one call.
+  const uint32_t bigChunk = TOTAL_SAMPLES;
+  dumpChunkToCallback(0, bigChunk, cb, ctx);
+}
+
+void FlashStorage::dumpChunkToCallback(uint32_t chunkIndex,
+                                       uint32_t samplesPerChunk,
+                                       LineCallback cb,
+                                       void* ctx) {
+  if (!cb) return;
+  if (totalSamplesRecorded == 0) {
+    if (Serial) Serial.println("No data in flash");
+    cb("NO_DATA_IN_FLASH", ctx);
+    cb("=== END FLASH DUMP ===", ctx);
+    return;
+  }
+
+  const uint32_t startSample = chunkIndex * samplesPerChunk;
+  if (startSample >= totalSamplesRecorded) {
+    cb("NO_DATA_IN_FLASH", ctx);
+    cb("=== END FLASH DUMP ===", ctx);
+    return;
+  }
+
+  const uint32_t endSample = std::min(startSample + samplesPerChunk, totalSamplesRecorded);
+
+  if (Serial) {
+    Serial.print("[BLE] CHUNK index=");
+    Serial.print(chunkIndex);
+    Serial.print(" start=");
+    Serial.print(startSample);
+    Serial.print(" end=");
+    Serial.println(endSample);
   }
 
   cb("time_s,alt_m,ax_ms2,ay_ms2,az_ms2", ctx);
@@ -288,6 +325,8 @@ void FlashStorage::dumpToCallback(LineCallback cb, void* ctx) {
   SectorHeader headers[SECTORS_COUNT];
   uint8_t headerCount = 0;
 
+  // Build ordered list of sectors participating in this chunk (same
+  // logic as full dump, but we will only traverse up to endSample).
   for (uint32_t i = 0; i < SECTORS_COUNT; ++i) {
     SectorData temp;
     uint32_t addr = storageBaseAddr + (i * sectorSize);
@@ -308,9 +347,11 @@ void FlashStorage::dumpToCallback(LineCallback cb, void* ctx) {
 
   uint32_t printed = 0;
   char line[96];
-  const uint32_t total = totalSamplesRecorded;
 
-  for (uint8_t h = 0; h < headerCount; ++h) {
+  // Walk sectors in sequence order and emit only the range
+  // [startSample, endSample) as CSV lines.
+  uint32_t globalIndex = 0;
+  for (uint8_t h = 0; h < headerCount && globalIndex < endSample; ++h) {
     uint32_t sectorIdx = headers[h].index;
     uint16_t count     = headers[h].count;
 
@@ -319,16 +360,16 @@ void FlashStorage::dumpToCallback(LineCallback cb, void* ctx) {
     if (flash.read(&sector, addr, sizeof(SectorData)) != 0) continue;
     if (sector.magic != FLASH_MAGIC) continue;
 
-    for (uint16_t sIdx = 0; sIdx < count; ++sIdx) {
-      if (printed >= TOTAL_SAMPLES) break;
+    for (uint16_t sIdx = 0; sIdx < count && globalIndex < endSample; ++sIdx, ++globalIndex) {
+      if (globalIndex < startSample) {
+        continue; // skip until we reach the first sample in this chunk
+      }
       SensorSample &s = sector.samples[sIdx];
 
       if (!isSampleValid(s)) {
         continue; // skip unreal / corrupted samples
       }
 
-      // Format line similar to Serial version
-      // Using snprintf with fixed decimal places
       snprintf(
         line,
         sizeof(line),
@@ -343,36 +384,11 @@ void FlashStorage::dumpToCallback(LineCallback cb, void* ctx) {
       cb(line, ctx);
       printed++;
 
-      // Give the BLE stack and central time to breathe on every sample.
-      // This drastically reduces the risk of disconnects when sending
-      // thousands of notifications in a row.
       bleYield();
-      delay(20);  // ~50 samples/second max burst rate (more conservative)
-
-      // Periodically report progress to the desktop app.
-      if (printed % 50 == 0) {
-        // Reuse existing EXPORT_PROGRESS: handler in desktop app
-        snprintf(
-          line,
-          sizeof(line),
-          "EXPORT_PROGRESS:%lu/%lu",
-          (unsigned long)printed,
-          (unsigned long)total
-        );
-        cb(line, ctx);
-      }
+      delay(20);
     }
   }
 
-  // Final progress update at 100%
-  snprintf(
-    line,
-    sizeof(line),
-    "EXPORT_PROGRESS:%lu/%lu",
-    (unsigned long)printed,
-    (unsigned long)total
-  );
-  cb(line, ctx);
-
+  // Indicate logical end of this chunk to the caller.
   cb("=== END FLASH DUMP ===", ctx);
 }

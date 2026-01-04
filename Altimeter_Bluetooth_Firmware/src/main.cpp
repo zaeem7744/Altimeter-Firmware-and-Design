@@ -7,6 +7,10 @@
 
 #define SEALEVELPRESSURE_HPA (1013.25)
 
+// Global flag used to temporarily suppress non-essential activity
+// (like serial heartbeats) during large BLE exports.
+bool g_exportInProgress = false;
+
 // Hardware pins
 const int BUTTON_PIN   = 5;    // Start/stop / BLE / clear button (active LOW, INPUT_PULLUP)
 const int LED_R_PIN    = LEDR;
@@ -176,22 +180,82 @@ bool initSensors() {
 
 // ---------------- BLE helpers ----------------
 
-// Helper used by FlashStorage BLE dump callback to send one text line over TX
+// Small helper for one-off status lines over BLE (MEMORY:, CONFIG:, etc.).
+// This sends a single line per notification and is NOT used for large dumps.
 void bleSendLine(const char* line, void* /*ctx*/) {
   if (!bleInitialized) return;
   if (!line || !*line) return;
 
-  char buf[80];
+  // Keep payload comfortably under the 64-byte characteristic size.
+  char buf[64];
   size_t len = strlen(line);
   if (len > sizeof(buf) - 2) {
     len = sizeof(buf) - 2;
   }
   memcpy(buf, line, len);
-  buf[len] = '\n';
+  buf[len]     = '\n';
   buf[len + 1] = '\0';
 
   bleTxChar.writeValue((const uint8_t*)buf, len + 1);
-  delay(2); // small pacing to avoid flooding
+  delay(2); // tiny pacing for infrequent lines
+}
+
+// For large flash exports we batch multiple CSV lines into each
+// notification to reduce the total number of BLE packets. The
+// desktop app parses the stream by newlines, so it is agnostic
+// to how many logical lines arrive per notification.
+static char   g_bleDumpBuf[64];
+static size_t g_bleDumpLen = 0;
+
+static void bleFlushDumpBuffer() {
+  if (!bleInitialized || g_bleDumpLen == 0) {
+    return;
+  }
+  bleTxChar.writeValue((const uint8_t*)g_bleDumpBuf, g_bleDumpLen);
+  g_bleDumpLen = 0;
+  // Maintain a small delay so we do not completely saturate the link.
+  delay(2);
+}
+
+// Callback used only for flash dumps over BLE.
+// It concatenates multiple CSV lines (separated by '\n') into a
+// single notification up to ~60 bytes before flushing.
+void bleDumpSendLine(const char* line, void* /*ctx*/) {
+  if (!bleInitialized || !line || !*line) return;
+
+  const size_t maxPayload = sizeof(g_bleDumpBuf) - 1; // leave room for final '\n'
+  size_t lineLen = strlen(line);
+  size_t pos     = 0;
+
+  while (pos < lineLen) {
+    // Flush if no space left for at least one more character.
+    if (g_bleDumpLen >= maxPayload) {
+      bleFlushDumpBuffer();
+    }
+
+    size_t space      = maxPayload - g_bleDumpLen;
+    size_t chunkBytes = lineLen - pos;
+    if (chunkBytes > space) {
+      chunkBytes = space;
+    }
+
+    memcpy(&g_bleDumpBuf[g_bleDumpLen], &line[pos], chunkBytes);
+    g_bleDumpLen += chunkBytes;
+    pos          += chunkBytes;
+
+    // If we filled the buffer exactly, flush and continue writing
+    // remaining bytes (if any) in a new packet.
+    if (g_bleDumpLen >= maxPayload) {
+      bleFlushDumpBuffer();
+    }
+  }
+
+  // Append newline as logical line terminator. If there is no room
+  // for it in the current packet, flush first.
+  if (g_bleDumpLen >= maxPayload) {
+    bleFlushDumpBuffer();
+  }
+  g_bleDumpBuf[g_bleDumpLen++] = '\n';
 }
 
 void onBleConnected(BLEDevice central) {
@@ -428,11 +492,76 @@ void onBleRxWritten(BLEDevice central, BLECharacteristic characteristic) {
     case 'D':
       // Dump flash contents over BLE (CSV via TX characteristic)
       Serial.println(F("BLE RX: 'D' received, dumping flash over BLE"));
-      flashStorage.dumpToCallback(bleSendLine, nullptr);
+      flashStorage.dumpToCallback(bleDumpSendLine, nullptr);
+      // Flush any remaining batched data after the dump completes.
+      bleFlushDumpBuffer();
       break;
 
+    case 'F': {
+      // File‑style chunk transfer commands: FINFO or FGET:<index>
+      // Parse payload after 'F' to distinguish subcommands.
+      if (len >= 5 && data[1] == 'I' && data[2] == 'N' && data[3] == 'F' && data[4] == 'O') {
+        // FINFO: return file metadata (total samples, chunk size, etc.)
+        Serial.println(F("BLE RX: FINFO received"));
+        uint32_t total = flashStorage.getTotalSamples();
+        const uint32_t samplesPerChunk = 100; // smaller chunks for more reliable long transfers
+        uint32_t totalChunks = (total + samplesPerChunk - 1) / samplesPerChunk;
+
+        char buf[80];
+        snprintf(
+          buf,
+          sizeof(buf),
+          "FILEINFO:totalSamples=%lu,samplesPerChunk=%lu,totalChunks=%lu",
+          (unsigned long)total,
+          (unsigned long)samplesPerChunk,
+          (unsigned long)totalChunks
+        );
+        bleSendLine(buf, nullptr);
+        Serial.println(buf);
+      } else if (len >= 4 && data[1] == 'G' && data[2] == 'E' && data[3] == 'T') {
+        // FGET:<chunkIndex> – parse ASCII digits after "FGET:"
+        uint32_t chunkIdx = 0;
+        bool valid = false;
+        // Look for the colon separator
+        int colonPos = -1;
+        for (int i = 4; i < len; ++i) {
+          if ((char)data[i] == ':') {
+            colonPos = i;
+            break;
+          }
+        }
+        if (colonPos >= 0) {
+          for (int i = colonPos + 1; i < len; ++i) {
+            char ch = (char)data[i];
+            if (ch >= '0' && ch <= '9') {
+              chunkIdx = chunkIdx * 10u + (uint32_t)(ch - '0');
+              valid = true;
+            } else {
+              break;
+            }
+          }
+        }
+
+        if (valid) {
+          Serial.print(F("BLE RX: FGET chunk="));
+          Serial.println(chunkIdx);
+          const uint32_t samplesPerChunk = 100; // must match FINFO
+          g_exportInProgress = true;
+          flashStorage.dumpChunkToCallback(chunkIdx, samplesPerChunk, bleDumpSendLine, nullptr);
+          g_exportInProgress = false;
+          bleFlushDumpBuffer();
+        } else {
+          Serial.println(F("BLE RX: FGET invalid chunk index"));
+          bleSendLine("FERROR:INVALID_CHUNK", nullptr);
+        }
+      } else {
+        Serial.println(F("BLE RX: unknown F command"));
+      }
+      break;
+    }
+
     default:
-      // Ignore other bytes; command set remains A,B,S,C,D,H only.
+      // Ignore other bytes; command set remains A,B,S,C,D,H,F,R.
       break;
   }
 }
@@ -720,7 +849,7 @@ void loop() {
 
   // --- Heartbeat on serial every few seconds ---
   static unsigned long lastHeartbeat = 0;
-  if (now - lastHeartbeat > 5000) {
+  if (!g_exportInProgress && (now - lastHeartbeat > 5000)) {
     lastHeartbeat = now;
     Serial.println(F("[HB] loop alive"));
   }

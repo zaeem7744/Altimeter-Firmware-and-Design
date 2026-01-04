@@ -46,6 +46,13 @@ public:
   typedef void (*LineCallback)(const char* line, void* ctx);
   void dumpToCallback(LineCallback cb, void* ctx);
 
+  // Chunked dump for file-style transfers over BLE. Dumps at most
+  // samplesPerChunk samples starting at chunkIndex * samplesPerChunk.
+  void dumpChunkToCallback(uint32_t chunkIndex,
+                           uint32_t samplesPerChunk,
+                           LineCallback cb,
+                           void* ctx);
+
   // Accessor for total samples (used for MEMORY: line)
   uint32_t getTotalSamples() const { return totalSamplesRecorded; }
 
