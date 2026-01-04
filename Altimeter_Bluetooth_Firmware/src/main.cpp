@@ -11,6 +11,10 @@
 // (like serial heartbeats) during large BLE exports.
 bool g_exportInProgress = false;
 
+// Monotonic session identifier used for FILEINFO/FGET-style exports so
+// the host can distinguish separate export attempts if desired.
+static uint32_t g_fileExportSessionId = 0;
+
 // Hardware pins
 const int BUTTON_PIN   = 5;    // Start/stop / BLE / clear button (active LOW, INPUT_PULLUP)
 const int LED_R_PIN    = LEDR;
@@ -507,14 +511,22 @@ void onBleRxWritten(BLEDevice central, BLECharacteristic characteristic) {
         const uint32_t samplesPerChunk = 100; // smaller chunks for more reliable long transfers
         uint32_t totalChunks = (total + samplesPerChunk - 1) / samplesPerChunk;
 
-        char buf[80];
+        // Bump session id so each FILEINFO represents a distinct snapshot
+        // of the flash contents.
+        ++g_fileExportSessionId;
+        if (g_fileExportSessionId == 0) {
+          g_fileExportSessionId = 1; // avoid zero as a valid session
+        }
+
+        char buf[96];
         snprintf(
           buf,
           sizeof(buf),
-          "FILEINFO:totalSamples=%lu,samplesPerChunk=%lu,totalChunks=%lu",
+          "FILEINFO:totalSamples=%lu,samplesPerChunk=%lu,totalChunks=%lu,sessionId=%lu",
           (unsigned long)total,
           (unsigned long)samplesPerChunk,
-          (unsigned long)totalChunks
+          (unsigned long)totalChunks,
+          (unsigned long)g_fileExportSessionId
         );
         bleSendLine(buf, nullptr);
         Serial.println(buf);
