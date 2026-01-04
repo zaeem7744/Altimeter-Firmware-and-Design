@@ -49,6 +49,11 @@ public:
   // Accessor for total samples (used for MEMORY: line)
   uint32_t getTotalSamples() const { return totalSamplesRecorded; }
 
+  // Expose storage layout so other modules (e.g. config) can place data
+  // in a reserved region outside the logging sectors.
+  uint32_t getStorageBaseAddr() const { return storageBaseAddr; }
+  uint32_t getSectorSize()     const { return sectorSize; }
+
 private:
   FlashIAP   flash;
   SectorData currentSector;

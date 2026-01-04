@@ -1,6 +1,11 @@
+#include <Arduino.h>
 #include "FlashStorage.h"
 #include <math.h>
 #include <stdio.h>
+
+// BLE polling is provided by main.cpp via bleYield() so this module
+// does not need to include ArduinoBLE (avoids Stream type ambiguity).
+extern void bleYield();
 
 FlashStorage flashStorage;
 
@@ -265,8 +270,10 @@ void FlashStorage::dumpToCallback(LineCallback cb, void* ctx) {
   if (!cb) return;
 
   if (totalSamplesRecorded == 0) {
-    // Mirror Serial behavior: log to Serial, but send no CSV lines to callback.
+    // Mirror Serial behavior AND notify BLE/desktop that no data is available.
     if (Serial) Serial.println("No data in flash");
+    cb("NO_DATA_IN_FLASH", ctx);
+    cb("=== END FLASH DUMP ===", ctx);
     return;
   }
 
@@ -301,6 +308,7 @@ void FlashStorage::dumpToCallback(LineCallback cb, void* ctx) {
 
   uint32_t printed = 0;
   char line[96];
+  const uint32_t total = totalSamplesRecorded;
 
   for (uint8_t h = 0; h < headerCount; ++h) {
     uint32_t sectorIdx = headers[h].index;
@@ -334,8 +342,37 @@ void FlashStorage::dumpToCallback(LineCallback cb, void* ctx) {
 
       cb(line, ctx);
       printed++;
+
+      // Give the BLE stack and central time to breathe on every sample.
+      // This drastically reduces the risk of disconnects when sending
+      // thousands of notifications in a row.
+      bleYield();
+      delay(20);  // ~50 samples/second max burst rate (more conservative)
+
+      // Periodically report progress to the desktop app.
+      if (printed % 50 == 0) {
+        // Reuse existing EXPORT_PROGRESS: handler in desktop app
+        snprintf(
+          line,
+          sizeof(line),
+          "EXPORT_PROGRESS:%lu/%lu",
+          (unsigned long)printed,
+          (unsigned long)total
+        );
+        cb(line, ctx);
+      }
     }
   }
+
+  // Final progress update at 100%
+  snprintf(
+    line,
+    sizeof(line),
+    "EXPORT_PROGRESS:%lu/%lu",
+    (unsigned long)printed,
+    (unsigned long)total
+  );
+  cb(line, ctx);
 
   cb("=== END FLASH DUMP ===", ctx);
 }

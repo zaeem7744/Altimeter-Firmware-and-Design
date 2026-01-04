@@ -23,9 +23,25 @@ unsigned long lastSampleTime = 0;
 unsigned long logStart_ms    = 0;   // time zero for this logging session
 unsigned long ignoreSerialUntil = 0;  // ignore junk for first 1 second
 
-// Sample rate (50 samples per second)
-const uint16_t SAMPLE_RATE_HZ     = 50;
-const uint16_t SAMPLE_INTERVAL_MS = 1000 / SAMPLE_RATE_HZ;
+// Configurable sample rate (Hz). Default 50 Hz.
+uint16_t g_sampleRateHz     = 50;
+uint16_t g_sampleIntervalMs = 1000 / 50;
+
+// Small config block stored in a reserved flash sector (separate from
+// the circular logging area) so the selected sample rate persists
+// across power cycles.
+struct SampleRateConfig {
+  uint32_t magic;
+  uint16_t version;
+  uint16_t sampleRateHz;
+  uint32_t reserved;    // padding / future‑use
+};
+
+static const uint32_t SAMPLE_RATE_CONFIG_MAGIC   = 0x52425852; // 'RBXR'
+static const uint16_t SAMPLE_RATE_CONFIG_VERSION = 1;
+
+static void loadSampleRateFromFlash();
+static void saveSampleRateToFlash();
 
 // Button handling
 const unsigned long BUTTON_DEBOUNCE_MS      = 50;
@@ -94,7 +110,7 @@ void printHelp() {
   Serial.println();
   Serial.println(F("=== Altimeter Logger (FLASH + Serial + BLE button control) ==="));
   Serial.println(F("Serial commands (1 char + Enter):"));
-  Serial.println(F("  A -> START logging to flash (50 samples/s)"));
+  Serial.println(F("  A -> START logging to flash (current sample rate)"));
   Serial.println(F("  B -> STOP logging"));
   Serial.println(F("  S -> STATUS (shows flash usage)"));
   Serial.println(F("  C -> CLEAR flash"));
@@ -126,6 +142,10 @@ void printStatus() {
   Serial.print(g_totalSamplesCached);
   Serial.print(F(",capacity="));
   Serial.println(TOTAL_SAMPLES);
+
+  // Configuration line: current sample rate in Hz
+  Serial.print(F("CONFIG:sampleRateHz="));
+  Serial.println(g_sampleRateHz);
 }
 
 // ---------------- Sensors ----------------
@@ -211,8 +231,123 @@ bool ensureBleInitialised() {
   return true;
 }
 
-// Forward-declare so BLE handlers can call it before its full definition.
+// Forward-declare so BLE handlers can call them before full definition.
 void processSerialCommand(char c);
+void stopBle();
+
+static void setSampleRateHz(uint16_t requestedHz) {
+  uint16_t newHz;
+  if (requestedHz <= 10) {
+    newHz = 10;
+  } else if (requestedHz <= 25) {
+    newHz = 25;
+  } else {
+    newHz = 50;
+  }
+  g_sampleRateHz     = newHz;
+  g_sampleIntervalMs = 1000 / g_sampleRateHz;
+
+  // Persist the new rate so it is restored after power cycles.
+  saveSampleRateToFlash();
+
+  Serial.print(F("CONFIG:sampleRateHz="));
+  Serial.println(g_sampleRateHz);
+}
+
+// Compute the address of the small config sector we use to store
+// persistent settings (currently just the sample rate). This lives
+// immediately after the circular logging area managed by FlashStorage
+// so it is never touched by clearStorage() or normal logging.
+static bool getSampleRateConfigAddress(uint32_t &configAddr, uint32_t &sectorSize) {
+  FlashIAP flash;
+  if (flash.init() != 0) {
+    return false;
+  }
+
+  uint32_t storageBase = flashStorage.getStorageBaseAddr();
+  sectorSize           = flash.get_sector_size(storageBase);
+  uint32_t flashStart  = flash.get_flash_start();
+  uint32_t flashSize   = flash.get_flash_size();
+
+  uint32_t dataRegionSize = SECTORS_COUNT * sectorSize;
+  uint32_t addr           = storageBase + dataRegionSize;
+
+  // Ensure there is at least one full sector available for config.
+  if (addr + sectorSize > flashStart + flashSize) {
+    flash.deinit();
+    return false;
+  }
+
+  configAddr = addr;
+  flash.deinit();
+  return true;
+}
+
+static void loadSampleRateFromFlash() {
+  uint32_t cfgAddr = 0;
+  uint32_t sectorSize = 0;
+  if (!getSampleRateConfigAddress(cfgAddr, sectorSize)) {
+    return; // fall back to compile-time default
+  }
+
+  FlashIAP flash;
+  if (flash.init() != 0) {
+    return;
+  }
+
+  SampleRateConfig cfg;
+  if (flash.read(&cfg, cfgAddr, sizeof(cfg)) != 0) {
+    flash.deinit();
+    return;
+  }
+  flash.deinit();
+
+  if (cfg.magic != SAMPLE_RATE_CONFIG_MAGIC ||
+      cfg.version != SAMPLE_RATE_CONFIG_VERSION) {
+    return; // no valid config stored yet
+  }
+
+  uint16_t sr = cfg.sampleRateHz;
+  if (sr != 10 && sr != 25 && sr != 50) {
+    return; // ignore nonsensical values
+  }
+
+  g_sampleRateHz     = sr;
+  g_sampleIntervalMs = 1000 / g_sampleRateHz;
+}
+
+static void saveSampleRateToFlash() {
+  uint32_t cfgAddr = 0;
+  uint32_t sectorSize = 0;
+  if (!getSampleRateConfigAddress(cfgAddr, sectorSize)) {
+    return;
+  }
+
+  FlashIAP flash;
+  if (flash.init() != 0) {
+    return;
+  }
+
+  SampleRateConfig cfg;
+  cfg.magic        = SAMPLE_RATE_CONFIG_MAGIC;
+  cfg.version      = SAMPLE_RATE_CONFIG_VERSION;
+  cfg.sampleRateHz = g_sampleRateHz;
+  cfg.reserved     = 0;
+
+  // Erase the whole sector that contains the config block, then
+  // program just the struct at the start of that sector.
+  if (flash.erase(cfgAddr, sectorSize) != 0) {
+    flash.deinit();
+    return;
+  }
+
+  if (flash.program(&cfg, cfgAddr, sizeof(cfg)) != 0) {
+    flash.deinit();
+    return;
+  }
+
+  flash.deinit();
+}
 
 void onBleRxWritten(BLEDevice central, BLECharacteristic characteristic) {
   (void)central;
@@ -229,7 +364,7 @@ void onBleRxWritten(BLEDevice central, BLECharacteristic characteristic) {
 
   switch (cmd) {
     case 'S': {
-      // Status: print to Serial AND send a compact MEMORY line over BLE
+      // Status: print to Serial AND send a compact MEMORY + CONFIG line over BLE
       processSerialCommand(cmd);  // updates g_totalSamplesCached via printStatus()
 
       char buf[64];
@@ -241,11 +376,49 @@ void onBleRxWritten(BLEDevice central, BLECharacteristic characteristic) {
         (unsigned long)TOTAL_SAMPLES
       );
       bleSendLine(buf, nullptr);
+
+      snprintf(
+        buf,
+        sizeof(buf),
+        "CONFIG:sampleRateHz=%u",
+        (unsigned)g_sampleRateHz
+      );
+      bleSendLine(buf, nullptr);
       break;
     }
 
-    case 'A':
+    case 'R': {
+      // Set sample rate from BLE: expect ASCII digits after 'R', e.g. "R10"/"R25"/"R50"
+      uint16_t requested = 0;
+      for (int i = 1; i < len; ++i) {
+        char ch = (char)data[i];
+        if (ch < '0' || ch > '9') break;
+        requested = (uint16_t)(requested * 10u + (uint16_t)(ch - '0'));
+      }
+      if (requested == 0) {
+        Serial.println(F("Invalid R command (no digits)"));
+        break;
+      }
+      setSampleRateHz(requested);
+
+      char buf[48];
+      snprintf(
+        buf,
+        sizeof(buf),
+        "CONFIG:sampleRateHz=%u",
+        (unsigned)g_sampleRateHz
+      );
+      bleSendLine(buf, nullptr);
+      break;
+    }
+
     case 'B':
+      // Stop logging AND explicitly shut down BLE when requested over BLE.
+      processSerialCommand(cmd);
+      stopBle();
+      break;
+
+    case 'A':
     case 'C':
     case 'H':
       // Reuse existing command handler so LED + logging behaviour stay consistent.
@@ -281,6 +454,14 @@ void stopBle() {
   bleAdvertising = false;
   bleConnected = false;
   Serial.println(F("BLE OFF"));
+}
+
+// Helper used by FlashStorage during long dumps to keep the BLE
+// connection alive. Called once per sample from dumpToCallback().
+void bleYield() {
+  if (bleInitialized && (bleAdvertising || bleConnected)) {
+    BLE.poll();
+  }
 }
 
 // ---------------- Logging helpers ----------------
@@ -522,7 +703,13 @@ void setup() {
     Serial.println(F("Sensor init failed. Logging disabled."));
   }
 
-  flashStorage.begin();
+  if (flashStorage.begin()) {
+    // Restore last configured sample rate (if any) so the device
+    // comes up with the same rate the desktop app previously set.
+    loadSampleRateFromFlash();
+  } else {
+    Serial.println(F("Flash storage init failed"));
+  }
 }
 
 void loop() {
@@ -557,7 +744,7 @@ void loop() {
 
   // --- Logging ---
   if (loggingEnabled) {
-    if (now - lastSampleTime >= SAMPLE_INTERVAL_MS) {
+    if (now - lastSampleTime >= g_sampleIntervalMs) {
       lastSampleTime = now;
 
       sensors_event_t accel, gyro, temp;

@@ -43,15 +43,13 @@ class DataPanel(QWidget):
     def create_realtime_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        
-        # Communication Logs
-        log_group = self.create_log_group()
-        layout.addWidget(log_group)
-        
-        # Visualization
+
+        # Visualization only; communication logs have been moved to the
+        # left control panel so the main dashboard focuses on flight
+        # statistics and visualization.
         viz_group = self.create_viz_group()
         layout.addWidget(viz_group)
-        
+
         return tab
         
     def create_extracted_tab(self):

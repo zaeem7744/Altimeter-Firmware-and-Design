@@ -1,6 +1,7 @@
 # ui_components/control_panel.py - UPDATED
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton, 
-                             QLabel, QComboBox, QGroupBox, QProgressBar, QFrame)
+                             QLabel, QComboBox, QGroupBox, QProgressBar, QFrame,
+                             QTextEdit, QCheckBox)
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtGui import QFont
 
@@ -15,6 +16,11 @@ class ControlPanel(QWidget):
     extract_data_requested = pyqtSignal()
     export_requested = pyqtSignal()
     view_data_requested = pyqtSignal()
+
+    # Log-related signals (used by the main window to handle actions)
+    auto_scroll_changed = pyqtSignal(bool)
+    clear_logs_requested = pyqtSignal()
+    save_logs_requested = pyqtSignal()
     
     def __init__(self):
         super().__init__()
@@ -38,6 +44,10 @@ class ControlPanel(QWidget):
         # Data Controls
         data_group = self.create_data_group()
         layout.addWidget(data_group)
+
+        # Communication log (placed below data controls / sample rate)
+        log_group = self.create_log_group()
+        layout.addWidget(log_group)
         
         # Statistics
         stats_group = self.create_stats_group()
@@ -155,6 +165,38 @@ class ControlPanel(QWidget):
         
         return group
         
+    def create_log_group(self):
+        group = QGroupBox("Communication Log")
+        layout = QVBoxLayout(group)
+
+        controls = QHBoxLayout()
+
+        self.auto_scroll_check = QCheckBox("Auto Scroll")
+        self.auto_scroll_check.setChecked(True)
+        self.auto_scroll_check.stateChanged.connect(
+            lambda state: self.auto_scroll_changed.emit(state == 2)
+        )
+        controls.addWidget(self.auto_scroll_check)
+
+        btn_clear_logs = QPushButton("Clear Logs")
+        btn_clear_logs.clicked.connect(self.clear_logs_requested.emit)
+        controls.addWidget(btn_clear_logs)
+
+        btn_save_logs = QPushButton("Save Logs")
+        btn_save_logs.clicked.connect(self.save_logs_requested.emit)
+        controls.addWidget(btn_save_logs)
+
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        self.communication_log = QTextEdit()
+        self.communication_log.setReadOnly(True)
+        self.communication_log.setMaximumHeight(200)
+        self.communication_log.setFont(QFont("Courier", 9))
+        layout.addWidget(self.communication_log)
+
+        return group
+
     def create_info_group(self):
         group = QGroupBox("System Information")
         layout = QVBoxLayout(group)
@@ -175,6 +217,21 @@ class ControlPanel(QWidget):
         layout.addWidget(info_label)
         
         return group
+
+    def add_log_message(self, message: str):
+        """Append a line to the communication log widget."""
+        if hasattr(self, "communication_log") and self.communication_log is not None:
+            self.communication_log.append(message)
+
+    def clear_log_view(self):
+        """Clear the text from the communication log widget."""
+        if hasattr(self, "communication_log") and self.communication_log is not None:
+            self.communication_log.clear()
+
+    def get_log_text(self) -> str:
+        if hasattr(self, "communication_log") and self.communication_log is not None:
+            return self.communication_log.toPlainText()
+        return ""
         
     def _on_connect_clicked(self):
         if self.device_combo.currentData():

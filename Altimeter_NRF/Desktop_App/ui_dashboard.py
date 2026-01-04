@@ -81,10 +81,10 @@ class TelemetryDashboard(QMainWindow):
         self.control_panel.export_requested.connect(self.export_to_csv)
         self.control_panel.view_data_requested.connect(self.view_all_data)
         
-        # Data Panel signals
-        self.data_panel.auto_scroll_changed.connect(self.set_auto_scroll)
-        self.data_panel.clear_logs_requested.connect(self.clear_logs)
-        self.data_panel.save_logs_requested.connect(self.save_logs)
+        # Log controls are now on the left control panel
+        self.control_panel.auto_scroll_changed.connect(self.set_auto_scroll)
+        self.control_panel.clear_logs_requested.connect(self.clear_logs)
+        self.control_panel.save_logs_requested.connect(self.save_logs)
         
         # Update timer
         self.update_timer = QTimer()
@@ -443,7 +443,7 @@ class TelemetryDashboard(QMainWindow):
         
     def clear_logs(self):
         """Clear communication logs"""
-        self.data_panel.clear_logs()
+        self.control_panel.clear_log_view()
         self.log_message("📋 Logs cleared")
         
     def save_logs(self):
@@ -453,7 +453,7 @@ class TelemetryDashboard(QMainWindow):
         )
         if filename:
             try:
-                log_content = self.data_panel.communication_log.toPlainText()
+                log_content = self.control_panel.get_log_text()
                 with open(filename, 'w', encoding='utf-8') as f:
                     f.write(log_content)
                 self.log_message(f"💾 Logs saved to {filename}")
@@ -469,10 +469,10 @@ class TelemetryDashboard(QMainWindow):
         """Add message to log with timestamp"""
         from datetime import datetime
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-        self.data_panel.add_log_message(f"[{timestamp}] {message}")
+        self.control_panel.add_log_message(f"[{timestamp}] {message}")
         
-        if self.auto_scroll:
-            scrollbar = self.data_panel.communication_log.verticalScrollBar()
+        if self.auto_scroll and hasattr(self.control_panel, "communication_log"):
+            scrollbar = self.control_panel.communication_log.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
         
     def show_message(self, message):
