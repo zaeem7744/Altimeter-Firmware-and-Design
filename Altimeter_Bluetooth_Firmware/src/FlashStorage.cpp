@@ -155,8 +155,9 @@ void FlashStorage::clearStorage() {
 
 void FlashStorage::printStatus() {
   Serial.println("=== FLASH STATUS ===");
+  uint32_t effective = getTotalSamples();
   Serial.print("Samples: ");
-  Serial.println(totalSamplesRecorded);
+  Serial.println(effective);
   Serial.print("Capacity: ");
   Serial.println(TOTAL_SAMPLES);
 }
@@ -197,6 +198,69 @@ static bool isSampleValid(const SensorSample &s) {
   }
 
   return true;
+}
+
+uint32_t FlashStorage::getTotalSamples() {
+  // Fast path: no data recorded.
+  if (totalSamplesRecorded == 0) {
+    return 0;
+  }
+
+  struct SectorHeader {
+    uint32_t index;
+    uint32_t seq;
+    uint16_t count;
+  };
+
+  SectorHeader headers[SECTORS_COUNT];
+  uint8_t headerCount = 0;
+
+  // Build an ordered list of sectors that contain data, sorted by
+  // sectorSequence so we walk samples in chronological order.
+  for (uint32_t i = 0; i < SECTORS_COUNT; ++i) {
+    SectorData temp;
+    uint32_t addr = storageBaseAddr + (i * sectorSize);
+    if (flash.read(&temp, addr, sizeof(SectorData)) != 0) continue;
+
+    if (temp.magic != FLASH_MAGIC || temp.samplesCount == 0) continue;
+
+    uint8_t insertPos = headerCount;
+    while (insertPos > 0 && headers[insertPos - 1].seq > temp.sectorSequence) {
+      headers[insertPos] = headers[insertPos - 1];
+      insertPos--;
+    }
+    headers[insertPos].index = i;
+    headers[insertPos].seq   = temp.sectorSequence;
+    headers[insertPos].count = temp.samplesCount;
+    if (headerCount < SECTORS_COUNT) headerCount++;
+  }
+
+  uint32_t valid = 0;
+
+  // Walk sectors and count only samples that pass isSampleValid(). This
+  // mirrors the filtering used by dumpToSerialSeconds() and
+  // dumpChunkToCallback(), so callers see the same sample count that
+  // will actually be exported.
+  for (uint8_t h = 0; h < headerCount; ++h) {
+    uint32_t sectorIdx = headers[h].index;
+    uint16_t count     = headers[h].count;
+
+    SectorData sector;
+    uint32_t addr = storageBaseAddr + (sectorIdx * sectorSize);
+    if (flash.read(&sector, addr, sizeof(SectorData)) != 0) continue;
+    if (sector.magic != FLASH_MAGIC) continue;
+
+    for (uint16_t sIdx = 0; sIdx < count; ++sIdx) {
+      if (valid >= TOTAL_SAMPLES) break;
+      SensorSample &s = sector.samples[sIdx];
+      if (!isSampleValid(s)) {
+        continue;
+      }
+      valid++;
+    }
+  }
+
+  return valid;
 }
 
 void FlashStorage::dumpToSerialSeconds() {

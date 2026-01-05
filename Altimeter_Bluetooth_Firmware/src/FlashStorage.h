@@ -53,8 +53,11 @@ public:
                            LineCallback cb,
                            void* ctx);
 
-  // Accessor for total samples (used for MEMORY: line)
-  uint32_t getTotalSamples() const { return totalSamplesRecorded; }
+  // Accessor for total *valid* samples that will actually be exported
+  // over Serial/BLE. This scans the stored sectors and counts only
+  // samples that pass isSampleValid(), so FILEINFO/MEMORY lines match
+  // the rows produced by dumpChunkToCallback().
+  uint32_t getTotalSamples();
 
   // Expose storage layout so other modules (e.g. config) can place data
   // in a reserved region outside the logging sectors.
