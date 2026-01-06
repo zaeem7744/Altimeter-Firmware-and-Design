@@ -1,0 +1,18 @@
+Altimeter Firmware - BLE Export Changes
+=======================================
+
+2026-01-04
+
+- Added a monotonically increasing `sessionId` for FILEINFO/FGET-based
+  BLE exports. Each time the host sends `FINFO`, the firmware now:
+  - Computes the current `totalSamples` and `totalChunks` as before.
+  - Increments an internal `g_fileExportSessionId` counter (wrapping
+    around 0 is avoided).
+  - Includes this value in the FILEINFO line as
+    `sessionId=<number>`.
+- The desktop app can use this `sessionId` to distinguish separate
+  export attempts and to correlate logs with a specific snapshot of the
+  flash contents.
+- No changes were made to the CSV format of individual chunks;
+  compatibility with existing tools that only use `totalSamples` and
+  `totalChunks` is preserved.
