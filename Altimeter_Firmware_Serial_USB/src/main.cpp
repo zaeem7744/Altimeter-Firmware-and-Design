@@ -822,6 +822,49 @@ void processSerialCommand(char c) {
   }
 }
 
+// Extended, line-oriented commands received over the USB serial port.
+// Currently used for sample-rate configuration (R10/R25/R50).
+static void processExtendedSerialCommand(const String &line) {
+  if (line.length() < 2) {
+    return;
+  }
+
+  char cmd = toupper(static_cast<unsigned char>(line[0]));
+
+  switch (cmd) {
+    case 'R': {  // R10 / R25 / R50
+      uint16_t requested = 0;
+      for (int i = 1; i < line.length(); ++i) {
+        char ch = line[i];
+        if (ch < '0' || ch > '9') {
+          break;
+        }
+        requested = static_cast<uint16_t>(requested * 10u + static_cast<uint16_t>(ch - '0'));
+      }
+      if (requested == 0) {
+        Serial.print(F("Invalid R command over Serial: '"));
+        Serial.print(line);
+        Serial.println('\'');
+        return;
+      }
+
+      setSampleRateHz(requested);
+
+      // Echo current configuration so the desktop app can update its UI
+      Serial.print(F("CONFIG:sampleRateHz="));
+      Serial.println(g_sampleRateHz);
+      break;
+    }
+
+    default:
+      // For now, just log unrecognised extended commands so the
+      // protocol can be expanded later without silently ignoring input.
+      Serial.print(F("RX LINE: "));
+      Serial.println(line);
+      break;
+  }
+}
+
 // ---------------- Arduino setup / loop ----------------
 
 void setup() {
@@ -891,12 +934,9 @@ void loop() {
         Serial.println(cmd);
         processSerialCommand(cmd);
       } else {
-        // Multi-character commands (e.g. future extensions like FINFO)
-        // are logged for now so the host can evolve without breaking
-        // backwards compatibility.
-        Serial.print(F("RX LINE: "));
-        Serial.println(cmdLine);
-        // TODO: parse extended text commands here if needed.
+        // Multi-character, line-oriented commands such as sample-rate
+        // configuration (R10/R25/R50) are handled here.
+        processExtendedSerialCommand(cmdLine);
       }
 
       cmdLine = "";
