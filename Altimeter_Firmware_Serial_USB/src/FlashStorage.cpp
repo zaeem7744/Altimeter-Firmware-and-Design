@@ -3,9 +3,9 @@
 #include <math.h>
 #include <stdio.h>
 
-// BLE polling is provided by main.cpp via bleYield() so this module
-// does not need to include ArduinoBLE (avoids Stream type ambiguity).
-extern void bleYield();
+// Optional hook that upper layers can use during long dumps. In the
+// current firmware this is a no-op stub.
+static inline void bleYield() {}
 
 FlashStorage flashStorage;
 
@@ -328,131 +328,4 @@ void FlashStorage::dumpToSerialSeconds() {
   }
 
   Serial.println("=== END FLASH DUMP ===");
-}
-
-
-void FlashStorage::dumpToCallback(LineCallback cb, void* ctx) {
-  if (!cb) return;
-
-  if (totalSamplesRecorded == 0) {
-    // Mirror Serial behavior AND notify BLE/desktop that no data is available.
-    if (Serial) Serial.println("No data in flash");
-    cb("NO_DATA_IN_FLASH", ctx);
-    cb("=== END FLASH DUMP ===", ctx);
-    return;
-  }
-
-  // Full dump is implemented in terms of the chunked API with a
-  // very large chunk size so all samples are sent in one call.
-  const uint32_t bigChunk = TOTAL_SAMPLES;
-  dumpChunkToCallback(0, bigChunk, cb, ctx);
-}
-
-void FlashStorage::dumpChunkToCallback(uint32_t chunkIndex,
-                                       uint32_t samplesPerChunk,
-                                       LineCallback cb,
-                                       void* ctx) {
-  if (!cb) return;
-  if (totalSamplesRecorded == 0) {
-    if (Serial) Serial.println("No data in flash");
-    cb("NO_DATA_IN_FLASH", ctx);
-    cb("=== END FLASH DUMP ===", ctx);
-    return;
-  }
-
-  const uint32_t startSample = chunkIndex * samplesPerChunk;
-  if (startSample >= totalSamplesRecorded) {
-    cb("NO_DATA_IN_FLASH", ctx);
-    cb("=== END FLASH DUMP ===", ctx);
-    return;
-  }
-
-  const uint32_t endSample = std::min(startSample + samplesPerChunk, totalSamplesRecorded);
-
-  if (Serial) {
-    Serial.print("[BLE] CHUNK index=");
-    Serial.print(chunkIndex);
-    Serial.print(" start=");
-    Serial.print(startSample);
-    Serial.print(" end=");
-    Serial.println(endSample);
-  }
-
-  cb("time_s,alt_m,ax_ms2,ay_ms2,az_ms2", ctx);
-
-  struct SectorHeader {
-    uint32_t index;
-    uint32_t seq;
-    uint16_t count;
-  };
-
-  SectorHeader headers[SECTORS_COUNT];
-  uint8_t headerCount = 0;
-
-  // Build ordered list of sectors participating in this chunk (same
-  // logic as full dump, but we will only traverse up to endSample).
-  for (uint32_t i = 0; i < SECTORS_COUNT; ++i) {
-    SectorData temp;
-    uint32_t addr = storageBaseAddr + (i * sectorSize);
-    if (flash.read(&temp, addr, sizeof(SectorData)) != 0) continue;
-
-    if (temp.magic != FLASH_MAGIC || temp.samplesCount == 0) continue;
-
-    uint8_t insertPos = headerCount;
-    while (insertPos > 0 && headers[insertPos - 1].seq > temp.sectorSequence) {
-      headers[insertPos] = headers[insertPos - 1];
-      insertPos--;
-    }
-    headers[insertPos].index = i;
-    headers[insertPos].seq   = temp.sectorSequence;
-    headers[insertPos].count = temp.samplesCount;
-    if (headerCount < SECTORS_COUNT) headerCount++;
-  }
-
-  uint32_t printed = 0;
-  char line[96];
-
-  // Walk sectors in sequence order and emit only the range
-  // [startSample, endSample) as CSV lines.
-  uint32_t globalIndex = 0;
-  for (uint8_t h = 0; h < headerCount && globalIndex < endSample; ++h) {
-    uint32_t sectorIdx = headers[h].index;
-    uint16_t count     = headers[h].count;
-
-    SectorData sector;
-    uint32_t addr = storageBaseAddr + (sectorIdx * sectorSize);
-    if (flash.read(&sector, addr, sizeof(SectorData)) != 0) continue;
-    if (sector.magic != FLASH_MAGIC) continue;
-
-    for (uint16_t sIdx = 0; sIdx < count && globalIndex < endSample; ++sIdx, ++globalIndex) {
-      if (globalIndex < startSample) {
-        continue; // skip until we reach the first sample in this chunk
-      }
-      SensorSample &s = sector.samples[sIdx];
-
-      if (!isSampleValid(s)) {
-        continue; // skip unreal / corrupted samples
-      }
-
-      snprintf(
-        line,
-        sizeof(line),
-        "%.3f,%.2f,%.3f,%.3f,%.3f",
-        (double)s.time_s,
-        (double)s.altitude_m,
-        (double)s.ax_ms2,
-        (double)s.ay_ms2,
-        (double)s.az_ms2
-      );
-
-      cb(line, ctx);
-      printed++;
-
-      bleYield();
-      delay(20);
-    }
-  }
-
-  // Indicate logical end of this chunk to the caller.
-  cb("=== END FLASH DUMP ===", ctx);
 }

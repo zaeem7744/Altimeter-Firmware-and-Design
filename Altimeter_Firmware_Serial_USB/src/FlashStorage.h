@@ -34,29 +34,23 @@ public:
   FlashStorage();
 
   bool begin();
-
+  
   void addSample(float time_s, float altitude_m,
                  float ax_ms2, float ay_ms2, float az_ms2);
+
+  // Returns true when the storage region is full (no more samples will
+  // be accepted). Used by main.cpp to stop logging cleanly when the
+  // defined capacity has been reached.
+  bool isFull() const { return totalSamplesRecorded >= TOTAL_SAMPLES; }
 
   void clearStorage();
   void printStatus();
   void dumpToSerialSeconds();  // CSV: time_s,alt_m,ax_ms2,ay_ms2,az_ms2
 
-  // Generic dump that sends each CSV line to a callback (used for BLE TX)
-  typedef void (*LineCallback)(const char* line, void* ctx);
-  void dumpToCallback(LineCallback cb, void* ctx);
-
-  // Chunked dump for file-style transfers over BLE. Dumps at most
-  // samplesPerChunk samples starting at chunkIndex * samplesPerChunk.
-  void dumpChunkToCallback(uint32_t chunkIndex,
-                           uint32_t samplesPerChunk,
-                           LineCallback cb,
-                           void* ctx);
-
   // Accessor for total *valid* samples that will actually be exported
-  // over Serial/BLE. This scans the stored sectors and counts only
-  // samples that pass isSampleValid(), so FILEINFO/MEMORY lines match
-  // the rows produced by dumpChunkToCallback().
+  // over Serial. This scans the stored sectors and counts only
+  // samples that pass isSampleValid(), so MEMORY lines match
+  // the rows produced by dumpToSerialSeconds().
   uint32_t getTotalSamples();
 
   // Expose storage layout so other modules (e.g. config) can place data

@@ -1,5 +1,4 @@
-﻿#include <Arduino.h>
-#include <ArduinoBLE.h>
+#include <Arduino.h>
 #include <Wire.h>
 #include <Adafruit_LSM6DSO32.h>
 #include <Adafruit_BMP3XX.h>
@@ -7,16 +6,9 @@
 
 #define SEALEVELPRESSURE_HPA (1013.25)
 
-// Global flag used to temporarily suppress non-essential activity
-// (like serial heartbeats) during large BLE exports.
-bool g_exportInProgress = false;
-
-// Monotonic session identifier used for FILEINFO/FGET-style exports so
-// the host can distinguish separate export attempts if desired.
-static uint32_t g_fileExportSessionId = 0;
 
 // Hardware pins
-const int BUTTON_PIN   = 5;    // Start/stop / BLE / clear button (active LOW, INPUT_PULLUP)
+const int BUTTON_PIN   = 5;    // Start/stop / clear button (active LOW, INPUT_PULLUP)
 const int LED_R_PIN    = LEDR;
 const int LED_G_PIN    = LEDG;
 const int LED_B_PIN    = LEDB;
@@ -26,10 +18,14 @@ Adafruit_LSM6DSO32 lsm6;
 Adafruit_BMP3XX    bmp;
 
 // Logging control
-bool loggingEnabled          = false;
-unsigned long lastSampleTime = 0;
-unsigned long logStart_ms    = 0;   // time zero for this logging session
+bool loggingEnabled             = false;
+unsigned long lastSampleTime    = 0;
+unsigned long logStart_ms       = 0;   // time zero for this logging session
 unsigned long ignoreSerialUntil = 0;  // ignore junk for first 1 second
+
+// Set when we hit the flash sampling capacity; used to stop logging and
+// show a distinct LED error pattern so the user knows the log is full.
+bool sampleOverflow = false;
 
 // Configurable sample rate (Hz). Default 50 Hz.
 uint16_t g_sampleRateHz     = 50;
@@ -74,27 +70,8 @@ ButtonState buttonState = {
   false
 };
 
-// BLE state
-bool bleInitialized  = false;
-bool bleAdvertising  = false;
-bool bleConnected    = false;
-
 // Cached flash sample count for MEMORY: line
 uint32_t g_totalSamplesCached = 0;
-
-BLEService controlService("19B10000-E8F2-537E-4F6C-D104768A1214");
-// RX: host writes commands (e.g. 'D' for dump)
-BLECharacteristic bleRxChar(
-  "19B10001-E8F2-537E-4F6C-D104768A1214",
-  BLEWrite | BLEWriteWithoutResponse,
-  20
-);
-// TX: device notifies CSV/text lines back to host
-BLECharacteristic bleTxChar(
-  "19B10002-E8F2-537E-4F6C-D104768A1214",
-  BLENotify | BLERead,
-  64
-);
 
 // Status
 bool clearInProgress = false;
@@ -116,7 +93,7 @@ void ledOff() {
 
 void printHelp() {
   Serial.println();
-  Serial.println(F("=== Altimeter Logger (FLASH + Serial + BLE button control) ==="));
+  Serial.println(F("=== Altimeter Logger (FLASH + USB Serial) ==="));
   Serial.println(F("Serial commands (1 char + Enter):"));
   Serial.println(F("  A -> START logging to flash (current sample rate)"));
   Serial.println(F("  B -> STOP logging"));
@@ -127,7 +104,6 @@ void printHelp() {
   Serial.println();
   Serial.println(F("Button patterns:"));
   Serial.println(F("  1x short press : Toggle logging"));
-  Serial.println(F("  2x short press : Toggle BLE advertising ON/OFF"));
   Serial.println(F("  Hold ~5 s      : Clear flash (red LED while clearing)"));
   Serial.println();
 }
@@ -136,11 +112,6 @@ void printStatus() {
   Serial.println(F("=== STATUS ==="));
   Serial.print(F("Logging: "));
   Serial.println(loggingEnabled ? F("ON") : F("OFF"));
-  Serial.print(F("BLE:     "));
-  if (!bleInitialized) Serial.println(F("OFF (not initialised)"));
-  else if (bleConnected) Serial.println(F("CONNECTED"));
-  else if (bleAdvertising) Serial.println(F("ADVERTISING"));
-  else Serial.println(F("IDLE"));
   flashStorage.printStatus();
 
   // Compact memory status line that desktop software can parse easily.
@@ -182,126 +153,7 @@ bool initSensors() {
   return true;
 }
 
-// ---------------- BLE helpers ----------------
-
-// Small helper for one-off status lines over BLE (MEMORY:, CONFIG:, etc.).
-// This sends a single line per notification and is NOT used for large dumps.
-void bleSendLine(const char* line, void* /*ctx*/) {
-  if (!bleInitialized) return;
-  if (!line || !*line) return;
-
-  // Keep payload comfortably under the 64-byte characteristic size.
-  char buf[64];
-  size_t len = strlen(line);
-  if (len > sizeof(buf) - 2) {
-    len = sizeof(buf) - 2;
-  }
-  memcpy(buf, line, len);
-  buf[len]     = '\n';
-  buf[len + 1] = '\0';
-
-  bleTxChar.writeValue((const uint8_t*)buf, len + 1);
-  delay(2); // tiny pacing for infrequent lines
-}
-
-// For large flash exports we batch multiple CSV lines into each
-// notification to reduce the total number of BLE packets. The
-// desktop app parses the stream by newlines, so it is agnostic
-// to how many logical lines arrive per notification.
-static char   g_bleDumpBuf[64];
-static size_t g_bleDumpLen = 0;
-
-static void bleFlushDumpBuffer() {
-  if (!bleInitialized || g_bleDumpLen == 0) {
-    return;
-  }
-  bleTxChar.writeValue((const uint8_t*)g_bleDumpBuf, g_bleDumpLen);
-  g_bleDumpLen = 0;
-  // Maintain a small delay so we do not completely saturate the link.
-  delay(2);
-}
-
-// Callback used only for flash dumps over BLE.
-// It concatenates multiple CSV lines (separated by '\n') into a
-// single notification up to ~60 bytes before flushing.
-void bleDumpSendLine(const char* line, void* /*ctx*/) {
-  if (!bleInitialized || !line || !*line) return;
-
-  const size_t maxPayload = sizeof(g_bleDumpBuf) - 1; // leave room for final '\n'
-  size_t lineLen = strlen(line);
-  size_t pos     = 0;
-
-  while (pos < lineLen) {
-    // Flush if no space left for at least one more character.
-    if (g_bleDumpLen >= maxPayload) {
-      bleFlushDumpBuffer();
-    }
-
-    size_t space      = maxPayload - g_bleDumpLen;
-    size_t chunkBytes = lineLen - pos;
-    if (chunkBytes > space) {
-      chunkBytes = space;
-    }
-
-    memcpy(&g_bleDumpBuf[g_bleDumpLen], &line[pos], chunkBytes);
-    g_bleDumpLen += chunkBytes;
-    pos          += chunkBytes;
-
-    // If we filled the buffer exactly, flush and continue writing
-    // remaining bytes (if any) in a new packet.
-    if (g_bleDumpLen >= maxPayload) {
-      bleFlushDumpBuffer();
-    }
-  }
-
-  // Append newline as logical line terminator. If there is no room
-  // for it in the current packet, flush first.
-  if (g_bleDumpLen >= maxPayload) {
-    bleFlushDumpBuffer();
-  }
-  g_bleDumpBuf[g_bleDumpLen++] = '\n';
-}
-
-void onBleConnected(BLEDevice central) {
-  bleConnected = true;
-  Serial.print(F("BLE connected: "));
-  Serial.println(central.address());
-}
-
-void onBleDisconnected(BLEDevice central) {
-  (void)central;
-  bleConnected = false;
-  Serial.println(F("BLE disconnected"));
-}
-
-bool ensureBleInitialised() {
-  if (bleInitialized) return true;
-
-  if (!BLE.begin()) {
-    Serial.println(F("BLE init failed"));
-    return false;
-  }
-
-  BLE.setDeviceName("Altimeter");
-  BLE.setLocalName("Altimeter");
-  BLE.setAdvertisedService(controlService);
-
-  // Attach characteristics to the control service
-  controlService.addCharacteristic(bleRxChar);
-  controlService.addCharacteristic(bleTxChar);
-  BLE.addService(controlService);
-
-  BLE.setEventHandler(BLEConnected, onBleConnected);
-  BLE.setEventHandler(BLEDisconnected, onBleDisconnected);
-
-  bleInitialized = true;
-  Serial.println(F("BLE stack initialised"));
-  return true;
-}
-
-// Forward-declare so BLE handlers can call them before full definition.
-void processSerialCommand(char c);
-void stopBle();
+// ---------------- Serial helpers ----------------
 
 static void setSampleRateHz(uint16_t requestedHz) {
   uint16_t newHz;
@@ -414,196 +266,13 @@ static void saveSampleRateToFlash() {
     return;
   }
 
-  flash.deinit();
+flash.deinit();
 }
 
-void onBleRxWritten(BLEDevice central, BLECharacteristic characteristic) {
-  (void)central;
-  int len = characteristic.valueLength();
-  if (len <= 0) return;
-
-  uint8_t data[20];
-  if (len > (int)sizeof(data)) len = sizeof(data);
-  characteristic.readValue(data, len);
-
-  char cmd = toupper((char)data[0]);
-  Serial.print(F("BLE RX CMD: "));
-  Serial.println(cmd);
-
-  switch (cmd) {
-    case 'S': {
-      // Status: print to Serial AND send a compact MEMORY + CONFIG line over BLE
-      processSerialCommand(cmd);  // updates g_totalSamplesCached via printStatus()
-
-      char buf[64];
-      snprintf(
-        buf,
-        sizeof(buf),
-        "MEMORY:totalSamples=%lu,capacity=%lu",
-        (unsigned long)g_totalSamplesCached,
-        (unsigned long)TOTAL_SAMPLES
-      );
-      bleSendLine(buf, nullptr);
-
-      snprintf(
-        buf,
-        sizeof(buf),
-        "CONFIG:sampleRateHz=%u",
-        (unsigned)g_sampleRateHz
-      );
-      bleSendLine(buf, nullptr);
-      break;
-    }
-
-    case 'R': {
-      // Set sample rate from BLE: expect ASCII digits after 'R', e.g. "R10"/"R25"/"R50"
-      uint16_t requested = 0;
-      for (int i = 1; i < len; ++i) {
-        char ch = (char)data[i];
-        if (ch < '0' || ch > '9') break;
-        requested = (uint16_t)(requested * 10u + (uint16_t)(ch - '0'));
-      }
-      if (requested == 0) {
-        Serial.println(F("Invalid R command (no digits)"));
-        break;
-      }
-      setSampleRateHz(requested);
-
-      char buf[48];
-      snprintf(
-        buf,
-        sizeof(buf),
-        "CONFIG:sampleRateHz=%u",
-        (unsigned)g_sampleRateHz
-      );
-      bleSendLine(buf, nullptr);
-      break;
-    }
-
-    case 'B':
-      // Stop logging AND explicitly shut down BLE when requested over BLE.
-      processSerialCommand(cmd);
-      stopBle();
-      break;
-
-    case 'A':
-    case 'C':
-    case 'H':
-      // Reuse existing command handler so LED + logging behaviour stay consistent.
-      processSerialCommand(cmd);
-      break;
-
-    case 'D':
-      // Dump flash contents over BLE (CSV via TX characteristic)
-      Serial.println(F("BLE RX: 'D' received, dumping flash over BLE"));
-      flashStorage.dumpToCallback(bleDumpSendLine, nullptr);
-      // Flush any remaining batched data after the dump completes.
-      bleFlushDumpBuffer();
-      break;
-
-    case 'F': {
-      // File‑style chunk transfer commands: FINFO or FGET:<index>
-      // Parse payload after 'F' to distinguish subcommands.
-      if (len >= 5 && data[1] == 'I' && data[2] == 'N' && data[3] == 'F' && data[4] == 'O') {
-        // FINFO: return file metadata (total samples, chunk size, etc.)
-        Serial.println(F("BLE RX: FINFO received"));
-        uint32_t total = flashStorage.getTotalSamples();
-        const uint32_t samplesPerChunk = 100; // smaller chunks for more reliable long transfers
-        uint32_t totalChunks = (total + samplesPerChunk - 1) / samplesPerChunk;
-
-        // Bump session id so each FILEINFO represents a distinct snapshot
-        // of the flash contents.
-        ++g_fileExportSessionId;
-        if (g_fileExportSessionId == 0) {
-          g_fileExportSessionId = 1; // avoid zero as a valid session
-        }
-
-        char buf[96];
-        snprintf(
-          buf,
-          sizeof(buf),
-          "FILEINFO:totalSamples=%lu,samplesPerChunk=%lu,totalChunks=%lu,sessionId=%lu",
-          (unsigned long)total,
-          (unsigned long)samplesPerChunk,
-          (unsigned long)totalChunks,
-          (unsigned long)g_fileExportSessionId
-        );
-        bleSendLine(buf, nullptr);
-        Serial.println(buf);
-      } else if (len >= 4 && data[1] == 'G' && data[2] == 'E' && data[3] == 'T') {
-        // FGET:<chunkIndex> – parse ASCII digits after "FGET:"
-        uint32_t chunkIdx = 0;
-        bool valid = false;
-        // Look for the colon separator
-        int colonPos = -1;
-        for (int i = 4; i < len; ++i) {
-          if ((char)data[i] == ':') {
-            colonPos = i;
-            break;
-          }
-        }
-        if (colonPos >= 0) {
-          for (int i = colonPos + 1; i < len; ++i) {
-            char ch = (char)data[i];
-            if (ch >= '0' && ch <= '9') {
-              chunkIdx = chunkIdx * 10u + (uint32_t)(ch - '0');
-              valid = true;
-            } else {
-              break;
-            }
-          }
-        }
-
-        if (valid) {
-          Serial.print(F("BLE RX: FGET chunk="));
-          Serial.println(chunkIdx);
-          const uint32_t samplesPerChunk = 100; // must match FINFO
-          g_exportInProgress = true;
-          flashStorage.dumpChunkToCallback(chunkIdx, samplesPerChunk, bleDumpSendLine, nullptr);
-          g_exportInProgress = false;
-          bleFlushDumpBuffer();
-        } else {
-          Serial.println(F("BLE RX: FGET invalid chunk index"));
-          bleSendLine("FERROR:INVALID_CHUNK", nullptr);
-        }
-      } else {
-        Serial.println(F("BLE RX: unknown F command"));
-      }
-      break;
-    }
-
-    default:
-      // Ignore other bytes; command set remains A,B,S,C,D,H,F,R.
-      break;
-  }
-}
-
-void startBleAdvertising() {
-  if (!ensureBleInitialised()) return;
-
-  bleRxChar.setEventHandler(BLEWritten, onBleRxWritten);
-
-  BLE.advertise();
-  bleAdvertising = true;
-  Serial.println(F("BLE advertising ON"));
-}
-
-void stopBle() {
-  if (!bleInitialized) return;
-  BLE.stopAdvertise();
-  BLE.disconnect();
-  bleAdvertising = false;
-  bleConnected = false;
-  Serial.println(F("BLE OFF"));
-}
-
-// Helper used by FlashStorage during long dumps to keep the BLE
-// connection alive. Called once per sample from dumpToCallback().
-void bleYield() {
-  if (bleInitialized && (bleAdvertising || bleConnected)) {
-    BLE.poll();
-  }
-}
+// Helper hook used by FlashStorage during long dumps. BLE is no longer
+// used, so this is a no-op stub that simply allows the logger to call
+// bleYield() without pulling in any wireless stacks.
+void bleYield() {}
 
 // ---------------- Logging helpers ----------------
 
@@ -611,6 +280,8 @@ void toggleLogging() {
   loggingEnabled = !loggingEnabled;
 
   if (loggingEnabled) {
+    // Starting a new logging session clears any previous overflow state.
+    sampleOverflow = false;
     lastSampleTime = 0;
     logStart_ms    = millis();
     Serial.println(F("Logging to FLASH STARTED (button)"));
@@ -622,13 +293,8 @@ void toggleLogging() {
 void handleClearFlash() {
   Serial.println(F("Clearing storage (long press)..."));
 
-  loggingEnabled = false;
-
-  // Remember whether BLE was active so we can restore advertising afterwards
-  bool wasBleActive = (bleAdvertising || bleConnected);
-  if (wasBleActive) {
-    stopBle();
-  }
+  loggingEnabled  = false;
+  sampleOverflow  = false;  // clear any previous overflow error state
 
   clearInProgress = true;
   setRgb(255, 64, 0);  // amber
@@ -649,35 +315,19 @@ void handleClearFlash() {
 
   // Notify host software that memory is now empty
   Serial.println(F("MEMORY_CLEARED"));
-  if (bleInitialized) {
-    bleSendLine("MEMORY_CLEARED", nullptr);
-  }
-
-  // If BLE was active before clearing, resume advertising so the PC can reconnect
-  if (wasBleActive) {
-    startBleAdvertising();
-  }
 
   // Do NOT auto‑restart logging; user can press button again if desired
   loggingEnabled = false;
 }
 
-void toggleBleFromButton() {
-  if (bleAdvertising || bleConnected) {
-    stopBle();
-  } else {
-    startBleAdvertising();
-  }
-}
 
 // ---------------- Button handling ----------------
 
 void handleShortPressPattern(uint8_t count) {
-  if (count == 1) {
-    toggleLogging();
-  } else if (count == 2) {
-    toggleBleFromButton();
-  }
+  // Any short-press pattern now simply toggles logging. The previous
+// previous double-press behavior is no longer used.
+  (void)count;
+  toggleLogging();
 }
 
 void updateButton(unsigned long now) {
@@ -725,7 +375,10 @@ void updateButton(unsigned long now) {
     }
   }
 
-  // Evaluate multi‑press when window elapsed and button is up
+  // Evaluate multi‑press when window elapsed and button is up. We still
+  // keep the small multi-press window for responsiveness, but regardless
+  // of how many short presses occurred, the behaviour is just a single
+  // "toggle logging" action.
   if (buttonState.stableState == HIGH &&
       buttonState.pressCount > 0 &&
       (now - buttonState.lastReleaseMs) > DOUBLE_PRESS_WINDOW_MS) {
@@ -739,41 +392,30 @@ void updateButton(unsigned long now) {
 
 void updateStatusLED(unsigned long now) {
   if (clearInProgress) {
-    // While clearing we just show solid amber/red, regardless of BLE state
+// While clearing we just show solid amber/red, regardless of other state
     setRgb(255, 80, 0);
     return;
   }
 
-  // Disconnected idle: LED off
-  if (!loggingEnabled && !bleAdvertising && !bleConnected) {
-    ledOff();
-    return;
-  }
-
-  // Connected to software: distinct solid blue pattern
-  if (bleConnected) {
-    if (loggingEnabled) {
-      // Logging + connected: cyan (green+blue)
-      setRgb(0, 200, 255);
-    } else {
-      // Connected only: solid blue
-      setRgb(0, 0, 255);
-    }
-    return;
-  }
-
-  // Advertising but not connected yet: slow blue blink
-  if (bleAdvertising && !bleConnected) {
-    unsigned long phase = now % 800; // 0..799
+  if (sampleOverflow) {
+    // Distinct fast red blink pattern when the sampling capacity has
+    // been reached and logging was stopped automatically.
+    unsigned long phase = now % 400; // 0..399
     if (phase < 200) {
-      setRgb(0, 0, 255);
+      setRgb(255, 0, 0);
     } else {
       ledOff();
     }
     return;
   }
 
-  // Fallback: logging only (no BLE)
+  // Disconnected idle: LED off
+  if (!loggingEnabled) {
+    ledOff();
+    return;
+  }
+  
+// Logging state
   if (loggingEnabled) {
     setRgb(0, 255, 0);
     return;
@@ -788,8 +430,9 @@ void processSerialCommand(char c) {
   switch (c) {
     case 'A':
       loggingEnabled = true;
-      lastSampleTime = 0;
-      logStart_ms    = millis();
+      sampleOverflow  = false;
+      lastSampleTime  = 0;
+      logStart_ms     = millis();
       Serial.println(F("Logging to FLASH STARTED"));
       break;
 
@@ -899,12 +542,12 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // --- Button handling (logging / BLE / clear) ---
+  // --- Button handling (logging / clear) ---
   updateButton(now);
 
   // --- Heartbeat on serial every few seconds ---
   static unsigned long lastHeartbeat = 0;
-  if (!g_exportInProgress && (now - lastHeartbeat > 5000)) {
+  if (now - lastHeartbeat > 5000) {
     lastHeartbeat = now;
     // Emit a simple heartbeat token that the desktop app can parse
     // to verify the link is still alive.
@@ -949,7 +592,16 @@ void loop() {
 
   // --- Logging ---
   if (loggingEnabled) {
-    if (now - lastSampleTime >= g_sampleIntervalMs) {
+    // If flash storage has reached its defined capacity, stop logging
+    // automatically and raise an overflow flag so the LED can show a
+    // distinct error state.
+    if (flashStorage.isFull()) {
+      if (!sampleOverflow) {
+        sampleOverflow  = true;
+        loggingEnabled  = false;
+        Serial.println(F("SAMPLE_CAPACITY_REACHED"));
+      }
+    } else if (now - lastSampleTime >= g_sampleIntervalMs) {
       lastSampleTime = now;
 
       sensors_event_t accel, gyro, temp;
@@ -970,11 +622,6 @@ void loop() {
         flashStorage.addSample(time_s, altitude, ax, ay, az);
       }
     }
-  }
-
-  // --- BLE polling ---
-  if (bleAdvertising || bleConnected) {
-    BLE.poll();
   }
 
   // --- LED status ---
